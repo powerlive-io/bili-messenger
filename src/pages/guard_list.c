@@ -378,7 +378,7 @@ static void export_txt_action(bm_app *app) {
     };
     if (cui_app_file_dialog(NULL, &fopts, path, sizeof path)) {
         if (bm_guard_export_txt(&app->store.guards, path)) {
-            bm_toast_push(app, "导出 TXT 成功", path, CUI_TONE_SUCCESS);
+            bm_toast_push(app, "导出 TXT 成功", bm_path_filename(path), CUI_TONE_SUCCESS);
         } else {
             bm_toast_push(app, "导出 TXT 失败", "请检查保存位置的写入权限和可用空间", CUI_TONE_DANGER);
         }
@@ -398,7 +398,7 @@ static void export_csv_action(bm_app *app) {
     };
     if (cui_app_file_dialog(NULL, &fopts, path, sizeof path)) {
         if (bm_guard_export_csv(&app->store.guards, path)) {
-            bm_toast_push(app, "导出 CSV 成功", path, CUI_TONE_SUCCESS);
+            bm_toast_push(app, "导出 CSV 成功", bm_path_filename(path), CUI_TONE_SUCCESS);
         } else {
             bm_toast_push(app, "导出 CSV 失败", "请检查保存位置的写入权限和可用空间", CUI_TONE_DANGER);
         }

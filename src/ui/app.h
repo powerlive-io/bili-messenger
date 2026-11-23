@@ -5,6 +5,7 @@
 #include "core/feedback.h"
 #include "core/guards.h"
 #include "core/jobs.h"
+#include "core/sent_history.h"
 #include "core/store.h"
 #include "core/util.h"
 #include "ui/fonts.h"
@@ -24,13 +25,6 @@ typedef enum bm_page_id {
     BM_PAGE_COUNT = 7
 } bm_page_id;
 
-typedef struct bm_sent_msg {
-    uint64_t uid;
-    char username[128];
-    char msg_key[64];
-    int64_t timestamp_ms;
-} bm_sent_msg;
-
 typedef struct bm_pending_toast {
     char title[128];
     char desc[256];
@@ -39,6 +33,7 @@ typedef struct bm_pending_toast {
 
 typedef struct bm_app {
     bm_store store;
+    bm_sent_history history;
     bm_page_id page;
     bool sidebar_mini;
     bool fonts_loaded;
@@ -97,9 +92,8 @@ typedef struct bm_app {
     int msg_progress_index;
     int msg_total_count;
     bm_guard_list msg_remain_list;
-    bm_sent_msg *sent_msgs;
-    int sent_msg_count;
-    int sent_msg_cap;
+    int msg_recall_cursor;
+    bool msg_recall_pending;
 
     /* Setting page */
     bm_user_profile account_profile;

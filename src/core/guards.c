@@ -377,8 +377,7 @@ bool bm_guard_import_text(bm_guard_list *list, const char *content, bool is_txt)
 bool bm_guard_import_file(bm_guard_list *list, const char *path) {
     if (!list || !path || !path[0]) return false;
     char *buf = NULL;
-    size_t len = 0;
-    if (!bm_read_file(path, &buf, &len)) return false;
+    if (!bm_read_file_utf8(path, &buf, NULL)) return false;
     size_t plen = strlen(path);
     bool is_txt = (plen > 0 && (path[plen - 1] == 't' || path[plen - 1] == 'T'));
     bool ok = bm_guard_import_text(list, buf, is_txt);

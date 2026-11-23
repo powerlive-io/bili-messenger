@@ -70,6 +70,16 @@ python3 assets/icons/generate.py
 
 ### 测试与打包
 
+本地文件导入导出使用文件选择器或拖拽返回的 UTF-8 路径。Windows 下通过宽字符文件接口打开，不按系统代码页解释路径。以下入口由 `bm_unicode_file_paths` 用含中文、空格的目录和文件名验证：
+
+| 页面 | 文件导入 | 文件导出 |
+| --- | --- | --- |
+| 目标列表 | TXT / CSV，支持选择文件和拖拽 | TXT / CSV |
+| 兑换码库 | TXT | — |
+| 已发送记录 | — | CSV |
+
+粘贴兑换码、手动添加用户和从网络拉取名单不涉及本地文件路径。上述约定针对路径，不改变文件内容的编码或格式。
+
 测试默认开启，可通过 `-DBM_BUILD_TESTS=OFF` 关闭。测试覆盖核心逻辑、反馈持久化、反馈界面及 HTTP 提交等行为，具体目标见 [CMakeLists.txt](../CMakeLists.txt)。
 
 仓库的 [Release 工作流](../.github/workflows/release.yml) 构建并测试 macOS 和 Windows 版本：

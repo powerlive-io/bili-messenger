@@ -4,10 +4,12 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
 size_t bm_strlcpy(char *dst, const char *src, size_t cap);
 char *bm_strdup(const char *s);
 char *bm_trim(char *s);
+const char *bm_path_filename(const char *path);
 
 void bm_str_replace_all(const char *src, const char *needle, const char *repl, char *out, size_t cap);
 void bm_url_encode(const char *src, char *out, size_t cap);
@@ -33,7 +35,11 @@ bool bm_ensure_dir(const char *path);
 bool bm_default_config_path(char *out, size_t cap);
 bool bm_read_file(const char *path, char **out_buf, size_t *out_len);
 bool bm_write_file(const char *path, const void *data, size_t len);
-/* Native save dialogs return UTF-8 paths, unlike getenv("APPDATA") on Windows. */
+bool bm_write_private_file_atomic(const char *path, const void *data, size_t len);
+/* UTF-8 describes the path, not the file contents. Use these for native
+   dialogs and drag-and-drop, not paths from getenv("APPDATA") on Windows. */
+bool bm_read_file_utf8(const char *path, char **out_buf, size_t *out_len);
+FILE *bm_open_write_utf8(const char *path);
 bool bm_write_file_utf8(const char *path, const void *data, size_t len);
 
 #endif /* BM_UTIL_H */
