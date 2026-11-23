@@ -301,7 +301,7 @@ bool bm_guard_export_txt(const bm_guard_list *list, const char *path) {
     size_t len = 0;
     char *txt = bm_guard_format_txt(list, &len);
     if (!txt) return false;
-    bool ok = bm_write_file(path, txt, len);
+    bool ok = bm_write_file_utf8(path, txt, len);
     free(txt);
     return ok;
 }
@@ -310,7 +310,7 @@ bool bm_guard_export_csv(const bm_guard_list *list, const char *path) {
     size_t len = 0;
     char *csv = bm_guard_format_csv(list, &len);
     if (!csv) return false;
-    bool ok = bm_write_file(path, csv, len);
+    bool ok = bm_write_file_utf8(path, csv, len);
     free(csv);
     return ok;
 }

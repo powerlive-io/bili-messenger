@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(BiliMessenger VERSION 2.0.0 LANGUAGES C)
+project(BiliMessenger VERSION 2.0.1 LANGUAGES C)
 
 set(BM_RELEASE_VERSION "" CACHE STRING "Release SemVer or tag (empty uses PROJECT_VERSION)")
 include(cmake/BMVersion.cmake)
@@ -144,6 +144,9 @@ if(BM_BUILD_TESTS)
     add_test(NAME bm_message_tests COMMAND bm_message_tests)
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
+        add_test(NAME bm_guard_export
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_guard_export.py
+                    $<TARGET_FILE:bm_guard_import_ui_tests>)
         add_test(NAME bm_feedback_http
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_feedback_http.py
                     $<TARGET_FILE:bm_feedback_tests>)

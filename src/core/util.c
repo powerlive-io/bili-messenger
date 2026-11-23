@@ -6,6 +6,7 @@
 #include "core/diagnostics.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,7 +16,6 @@
 #include <direct.h>
 #include <windows.h>
 #else
-#include <errno.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -426,17 +426,33 @@ bool bm_read_file(const char *path, char **out_buf, size_t *out_len) {
     return ok;
 }
 
-static bool write_file(const char *path, const void *data, size_t len) {
-    if (!path) return false;
-    FILE *f = fopen(path, "wb");
-    if (!f) return false;
-    size_t n = len > 0 ? fwrite(data, 1, len, f) : 0;
-    fclose(f);
-    return n == len;
+static bool write_and_close(FILE *f, const void *data, size_t len) {
+    bool ok = false;
+    if (f) {
+        size_t n = len > 0 ? fwrite(data, 1, len, f) : 0;
+        ok = fclose(f) == 0 && n == len;
+    }
+    bm_diagnostics_event(BM_EVENT_FILE_WRITE, ok ? BM_LOG_INFO : BM_LOG_ERROR, ok ? 0 : 1, (int64_t)len);
+    return ok;
 }
 
 bool bm_write_file(const char *path, const void *data, size_t len) {
-    bool ok = write_file(path, data, len);
-    bm_diagnostics_event(BM_EVENT_FILE_WRITE, ok ? BM_LOG_INFO : BM_LOG_ERROR, ok ? 0 : 1, (int64_t)len);
-    return ok;
+    return write_and_close(path ? fopen(path, "wb") : NULL, data, len);
+}
+
+bool bm_write_file_utf8(const char *path, const void *data, size_t len) {
+#if defined(_WIN32)
+    FILE *f = NULL;
+    int count = path ? MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0) : 0;
+    if (count > 0) {
+        wchar_t *wide = malloc((size_t)count * sizeof *wide);
+        if (wide && MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, count)) {
+            f = _wfopen(wide, L"wb");
+        }
+        free(wide);
+    }
+    return write_and_close(f, data, len);
+#else
+    return bm_write_file(path, data, len);
+#endif
 }

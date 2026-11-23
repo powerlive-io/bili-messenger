@@ -18,6 +18,8 @@ static bool spawn_ok = true;
 static void *pending_job;
 static char last_toast[256];
 static char last_toast_desc[256];
+static const char *export_dir;
+static bool rename_export;
 
 static void test_date_today(int *y, int *m, int *d) {
     *y = today.year;
@@ -54,8 +56,11 @@ bool bm_guard_filter_chip(cui_ctx *ui, const char *id, int level, const char *la
 }
 cui_texture bm_image_get(cui_ctx *ui, const char *url, int *w, int *h) { return 0; }
 bool cui_app_file_dialog(cui_app *app, const cui_file_dialog_opts *opts, char *out, size_t cap) {
-    assert(!"Unexpected file dialog");
-    return false;
+    assert(export_dir && opts->kind == CUI_FILE_SAVE);
+    int n = rename_export ? snprintf(out, cap, "%s/舰长名单.%s", export_dir, opts->filter)
+                          : snprintf(out, cap, "%s/%s", export_dir, opts->default_name);
+    assert(n > 0 && (size_t)n < cap);
+    return true;
 }
 bool cui_app_open_url(const char *url) {
     assert(!"Unexpected external URL");
@@ -280,7 +285,40 @@ static void test_dialog(int width, int height, cui_theme_mode theme, float font_
     cui_sw_destroy(renderer);
 }
 
-int main(void) {
+/* The Python driver sets up the filesystem and checks the actual Unicode names and contents. */
+static void test_export(void) {
+    bm_app *app = calloc(1, sizeof *app);
+    assert(app);
+    strcpy(app->store.room_id, "12345");
+    app->snapshot_date = (cui_date){2026, 1, 15};
+    for (int i = 1; i <= 103; ++i) {
+        bm_guard g = {.uid = 100000 + i, .guard_level = 3, .selected = true};
+        snprintf(g.username, sizeof g.username, "用户%03d", i);
+        assert(bm_guard_list_push(&app->store.guards, &g));
+    }
+
+    export_dir = "中文目录";
+    for (int i = 0; i < 2; ++i) {
+        rename_export = i != 0;
+        export_txt_action(app);
+        assert(!strcmp(last_toast, "导出 TXT 成功"));
+        export_csv_action(app);
+        assert(!strcmp(last_toast, "导出 CSV 成功"));
+    }
+    export_dir = "missing";
+    export_txt_action(app);
+    assert(!strcmp(last_toast, "导出 TXT 失败"));
+    export_csv_action(app);
+    assert(!strcmp(last_toast, "导出 CSV 失败"));
+    bm_guard_list_free(&app->store.guards);
+    free(app);
+}
+
+int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "--export")) {
+        test_export();
+        return 0;
+    }
     test_presets();
     test_dialog(1024, 640, CUI_THEME_LIGHT, 1.0f);
     test_dialog(1280, 760, CUI_THEME_DARK, 1.25f);

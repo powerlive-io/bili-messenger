@@ -33,5 +33,7 @@ bool bm_ensure_dir(const char *path);
 bool bm_default_config_path(char *out, size_t cap);
 bool bm_read_file(const char *path, char **out_buf, size_t *out_len);
 bool bm_write_file(const char *path, const void *data, size_t len);
+/* Native save dialogs return UTF-8 paths, unlike getenv("APPDATA") on Windows. */
+bool bm_write_file_utf8(const char *path, const void *data, size_t len);
 
 #endif /* BM_UTIL_H */
