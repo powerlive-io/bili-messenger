@@ -475,7 +475,7 @@ static void test_recall_save_failure(void) {
     bm_app *app = new_app();
     assert(bm_store_save(&app->store));
     for (int i = 0; i < 3; i++) {
-        bm_sent_msg m = {.sender_uid = "42", .timestamp_ms = bm_now_ms()};
+        bm_sent_msg m = {.target = {.uid = 123}, .sender_uid = "42", .timestamp_ms = bm_now_ms()};
         snprintf(m.msg_key, sizeof m.msg_key, "key-%d", i);
         assert(bm_sent_history_append(&app->history, &m));
     }
