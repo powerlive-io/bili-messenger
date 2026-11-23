@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(BiliMessenger VERSION 2.0.1 LANGUAGES C)
+project(BiliMessenger VERSION 2.1.0 LANGUAGES C)
 
 set(BM_RELEASE_VERSION "" CACHE STRING "Release SemVer or tag (empty uses PROJECT_VERSION)")
 include(cmake/BMVersion.cmake)
