@@ -80,7 +80,7 @@ python3 assets/icons/generate.py
 | Windows x64 | `BiliMessenger-Windows-x64.exe` | 免安装单文件 |
 | Windows x64 | `BiliMessenger-Windows-x64-Setup.exe` | 当前用户安装程序，无需管理员权限，支持快捷方式和卸载 |
 
-推送 tag 时上传到 GitHub Release；手动触发时不创建 Release，可从 Actions 的 artifacts 下载构建产物。Linux 不在当前发布工作流中。
+在 tag 上运行时，工作流等两个平台均构建、测试成功后，将这三个文件上传到同一份 GitHub Release 草稿，不会自动公开。维护者在 Releases 页面核对附件、填写发布说明后，手动点击 **Publish release**。已公开的版本不会被重跑覆盖。在分支上手动触发只生成 Actions artifacts，不创建 Release。Linux 不在当前发布工作流中。
 
 发布 tag 使用 SemVer 格式（可带 `v` 前缀），例如 `v2.0.1`。带预发布后缀的 tag（如 `v2.1.0-beta.1`、`v2.1.0-rc.1`）会自动标记为 GitHub prerelease；`+` 后的构建元数据不影响该判断。两个平台共用同一判断结果。客户端通过 GitHub `/releases/latest` 获取正式版，并与 CMake 提供的 `BM_VERSION` 做语义化版本比较；不会提示升级到更低或相同版本，构建元数据不参与版本优先级比较。
 
