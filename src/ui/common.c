@@ -9,6 +9,12 @@ void bm_app_init(bm_app *app) {
     memset(app, 0, sizeof *app);
     bm_store_init(&app->store);
     bm_store_load(&app->store, NULL);
+    char history_path[sizeof app->history.path];
+    int dir_len = (int)(bm_path_filename(app->store.path) - app->store.path);
+    snprintf(history_path, sizeof history_path, "%.*ssent-history.json", dir_len, app->store.path);
+    if (!app->store.path[0] || !bm_sent_history_open(&app->history, history_path)) {
+        bm_toast_push(app, "无法读取发送记录", "请检查 sent-history.json 后重启，原文件不会被覆盖", CUI_TONE_WARNING);
+    }
     snprintf(app->feedback_path, sizeof app->feedback_path, "%s.feedback.json", app->store.path);
     app->feedback.include_log = true;
     app->feedback_load_failed = !app->store.path[0]
@@ -58,23 +64,55 @@ void bm_app_shutdown(bm_app *app, cui_ctx *ui) {
     bm_images_shutdown(ui);
     bm_date_list_free(&app->valid_dates);
     bm_guard_list_free(&app->msg_remain_list);
-    free(app->sent_msgs);
-    app->sent_msgs = NULL;
-    app->sent_msg_count = app->sent_msg_cap = 0;
+    bm_sent_history_free(&app->history);
     bm_store_free(&app->store);
+}
+
+static size_t utf8_boundary(const char *s, size_t n) {
+    while (n && ((unsigned char)s[n] & 0xc0) == 0x80) n--;
+    return n;
+}
+
+static void copy_toast_line(char *dst, size_t cap, const char *src) {
+    if (bm_strlcpy(dst, src, cap) >= cap) {
+        strcpy(dst + utf8_boundary(src, cap - sizeof "…"), "…");
+    }
+}
+
+/* CUI toasts render single-line text. Measure with the actual theme and fonts;
+   byte limits alone don't keep long filenames or translated messages inside. */
+static void fit_toast_line(cui_ctx *ui, char *line, size_t cap, cui_font font, float size, float width) {
+    if (cui_measure_text(ui, font, size, line, -1).width <= width) return;
+    size_t n = strlen(line);
+    if (n > cap - sizeof "…") n = cap - sizeof "…";
+    else if (n) n--;
+    for (;;) {
+        n = utf8_boundary(line, n);
+        strcpy(line + n, "…");
+        if (!n || cui_measure_text(ui, font, size, line, -1).width <= width) break;
+        n--;
+    }
 }
 
 void bm_toast_push(bm_app *app, const char *title, const char *desc, cui_tone tone) {
     if (!app || app->toast_count >= 8) return;
     bm_pending_toast *t = &app->toasts[app->toast_count++];
-    bm_strlcpy(t->title, title ? title : "", sizeof t->title);
-    bm_strlcpy(t->desc, desc ? desc : "", sizeof t->desc);
+    copy_toast_line(t->title, sizeof t->title, title);
+    copy_toast_line(t->desc, sizeof t->desc, desc);
     t->tone = tone;
 }
 
 void bm_toast_flush(bm_app *app, cui_ctx *ui) {
+    if (!app->toast_count) return;
+    const cui_theme *theme = cui_theme_get(ui);
+    float card = cui_viewport_size(ui).x - 32;
+    if (card > 360) card = 360;
+    /* CUI's toast padding, tone icon, two gaps and close button. */
+    float width = card - (28 + 17 + 24 + 24 + 2);
     for (int i = 0; i < app->toast_count; i++) {
         bm_pending_toast *t = &app->toasts[i];
+        fit_toast_line(ui, t->title, sizeof t->title, CUI_FONT_MEDIUM, theme->text_body * theme->font_scale, width);
+        fit_toast_line(ui, t->desc, sizeof t->desc, CUI_FONT_BODY, (theme->text_body - 0.5f) * theme->font_scale, width);
         cui_toast(ui, t->title, .description = t->desc[0] ? t->desc : NULL, .tone = t->tone, .duration = 4.0f);
     }
     app->toast_count = 0;

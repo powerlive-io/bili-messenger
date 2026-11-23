@@ -124,9 +124,8 @@ void bm_page_codes(cui_ctx *ui, bm_app *app) {
                     .filter = "txt"
                 };
                 if (cui_app_file_dialog(NULL, &fopts, path, sizeof path)) {
-                    size_t len = 0;
                     char *content = NULL;
-                    if (bm_read_file(path, &content, &len) && content) {
+                    if (bm_read_file_utf8(path, &content, NULL)) {
                         int added = bm_store_import_codes(&app->store, content);
                         free(content);
                         bm_store_save(&app->store);

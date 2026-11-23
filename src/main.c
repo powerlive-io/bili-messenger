@@ -102,8 +102,8 @@ static void render_sidebar(cui_ctx *ui, bm_app *app) {
     }
     if (app->msg_in_progress) {
         snprintf(msg_badge, sizeof msg_badge, "%d/%d", app->msg_progress_index, app->msg_total_count);
-    } else if (app->sent_msg_count > 0) {
-        snprintf(msg_badge, sizeof msg_badge, "%d", app->sent_msg_count);
+    } else if (app->history.count > 0) {
+        snprintf(msg_badge, sizeof msg_badge, "%d", app->history.count);
     }
 
     float width = app->sidebar_mini ? 68.0f : 236.0f;

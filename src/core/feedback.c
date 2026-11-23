@@ -9,13 +9,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifdef _WIN32
-#include <windows.h>
-#else
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <unistd.h>
-#endif
 
 #define FEEDBACK_URL "https://api.powerlive.io/feedback"
 
@@ -318,35 +311,7 @@ bool bm_feedback_save(const bm_feedback *d, const char *path) {
     char *text = ok ? cJSON_PrintUnformatted(json) : NULL;
     cJSON_Delete(json);
     if (!text) return false;
-    char tmp[1200];
-    int n = snprintf(tmp, sizeof tmp, "%s.tmp", path);
-    if (n < 0 || (size_t)n >= sizeof tmp) { free(text); return false; }
-#ifdef _WIN32
-    FILE *f = fopen(tmp, "wb");
-#else
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    FILE *f = NULL;
-    if (fd >= 0) {
-        if (fchmod(fd, 0600) == 0) f = fdopen(fd, "wb");
-        if (!f) close(fd);
-    }
-#endif
-    ok = false;
-    if (f) {
-        size_t len = strlen(text);
-        ok = fwrite(text, 1, len, f) == len;
-        if (fflush(f) != 0) ok = false;
-#ifndef _WIN32
-        if (fsync(fileno(f)) != 0) ok = false;
-#endif
-        if (fclose(f) != 0) ok = false;
-#ifdef _WIN32
-        if (ok) ok = MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
-#else
-        if (ok) ok = rename(tmp, path) == 0;
-#endif
-    }
-    if (!ok) remove(tmp);
+    ok = bm_write_private_file_atomic(path, text, strlen(text));
     free(text);
     return ok;
 }

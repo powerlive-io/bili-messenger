@@ -4,27 +4,32 @@
 #include <stdlib.h>
 #include <string.h>
 
-static void record_sent_msg(bm_app *app, const bm_guard *target, const char *msg_key, int64_t ts_ms) {
-    if (app->sent_msg_count >= app->sent_msg_cap) {
-        int ncap = app->sent_msg_cap == 0 ? 64 : app->sent_msg_cap * 2;
-        bm_sent_msg *nm = (bm_sent_msg *)realloc(app->sent_msgs, (size_t)ncap * sizeof(bm_sent_msg));
-        if (!nm) return;
-        app->sent_msgs = nm;
-        app->sent_msg_cap = ncap;
-    }
-    bm_sent_msg *m = &app->sent_msgs[app->sent_msg_count++];
-    m->uid = target->uid;
-    bm_strlcpy(m->username, target->username, sizeof m->username);
-    bm_strlcpy(m->msg_key, msg_key, sizeof m->msg_key);
-    m->timestamp_ms = ts_ms;
+static bool save_sent_history(bm_app *app) {
+    if (bm_sent_history_save(&app->history)) return true;
+    bm_toast_push(app, "发送记录未能保存", "请检查本地配置目录的写入权限和可用空间", CUI_TONE_DANGER);
+    return false;
 }
 
-static void remove_sent_msg_at(bm_app *app, int idx) {
-    if (idx < 0 || idx >= app->sent_msg_count) return;
-    for (int i = idx; i + 1 < app->sent_msg_count; i++) {
-        app->sent_msgs[i] = app->sent_msgs[i + 1];
+static void export_sent_history(bm_app *app) {
+    char date[16], name[128], path[1024];
+    bm_date_today_str(date, sizeof date);
+    snprintf(name, sizeof name, "%s-已发送记录-%s.csv", app->store.room_id, date);
+    cui_file_dialog_opts opts = {
+        .kind = CUI_FILE_SAVE, .title = "导出已发送记录",
+        .filter_name = "CSV 文件", .filter = "csv", .default_name = name
+    };
+    if (!cui_app_file_dialog(NULL, &opts, path, sizeof path)) return;
+    if (bm_sent_history_export_csv(app->history.items, app->history.count, path)) {
+        bm_toast_push(app, "导出 CSV 成功", bm_path_filename(path), CUI_TONE_SUCCESS);
+    } else {
+        bm_toast_push(app, "导出 CSV 失败", "请检查保存位置的写入权限和可用空间", CUI_TONE_DANGER);
     }
-    app->sent_msg_count--;
+}
+
+static void clear_sent_history(bm_app *app) {
+    int count = app->history.count;
+    app->history.count = 0;
+    if (!save_sent_history(app)) app->history.count = count;
 }
 
 static const char *current_template_content(const bm_app *app) {
@@ -38,13 +43,10 @@ static const char *current_template_content(const bm_app *app) {
 
 typedef struct {
     bm_login_info login;
-    bm_guard target;
-    uint64_t roster_generation;
+    bm_sent_msg sent;
     char message[4096];
-    bool use_code;
-    char code_used[256];
+    uint64_t roster_generation;
     int interval_ms;
-    char msg_key_out[64];
     bool ok;
     bm_bili_err err;
 } send_step_job;
@@ -70,23 +72,31 @@ static void on_send_step_done(void *raw, void *user) {
 
     if (!d->ok) {
         char title[160];
-        snprintf(title, sizeof title, "向 %s 发送失败", d->target.username);
+        snprintf(title, sizeof title, "向 %s 发送失败", d->sent.target.username);
         bm_toast_push(app, title, d->err.message, CUI_TONE_DANGER);
-        if (same_roster) bm_guard_list_push(&app->msg_remain_list, &d->target);
+        if (same_roster) bm_guard_list_push(&app->msg_remain_list, &d->sent.target);
     } else {
-        record_sent_msg(app, &d->target, d->msg_key_out, bm_now_ms());
-        if (d->use_code) {
-            bm_store_consume_code(&app->store, d->code_used);
+        if (!bm_sent_history_append(&app->history, &d->sent)) {
+            bm_toast_push(app, "私信已发送，但记录未能保留", "内存不足，群发已暂停", CUI_TONE_DANGER);
+            app->msg_in_progress = false;
+        } else if (!save_sent_history(app)) {
+            app->msg_in_progress = false;
+        }
+        if (d->sent.code[0]) {
+            bm_store_consume_code(&app->store, d->sent.code);
         }
     }
 
     if (same_roster) {
-        bm_guard_note_send_result(&app->store.original_guards, &app->store.guards, &d->target, d->ok);
+        bm_guard_note_send_result(&app->store.original_guards, &app->store.guards, &d->sent.target, d->ok);
         app->msg_progress_index++;
     }
     bm_guard_compute_stats(&app->store.original_guards, &app->stats);
 
-    bm_store_save(&app->store);
+    if (!bm_store_save(&app->store)) {
+        bm_toast_push(app, "名单和兑换码未能保存", "请检查本地配置目录的写入权限和可用空间", CUI_TONE_DANGER);
+        app->msg_in_progress = false;
+    }
     free(d);
 
     if (app->msg_in_progress && !app->msg_is_recalling) {
@@ -98,11 +108,13 @@ static void on_send_step_done(void *raw, void *user) {
 
 static void send_step_worker(void *raw) {
     send_step_job *d = (send_step_job *)raw;
-    if (d->target.uid == 0) {
+    if (d->sent.target.uid == 0) {
         d->err.code = -1;
         bm_strlcpy(d->err.message, "无效的用户 UID，已跳过", sizeof d->err.message);
     } else {
-        d->ok = bm_bili_send_message(&d->login, d->target.uid, d->message, d->msg_key_out, sizeof d->msg_key_out, &d->err);
+        d->ok = bm_bili_send_message(&d->login, d->sent.target.uid, d->message,
+                                     d->sent.msg_key, sizeof d->sent.msg_key, &d->err);
+        if (d->ok) d->sent.timestamp_ms = bm_now_ms();
     }
     if (d->interval_ms > 0) {
         bm_sleep_ms((uint32_t)d->interval_ms);
@@ -112,6 +124,11 @@ static void send_step_worker(void *raw) {
 
 static void trigger_next_send_step(bm_app *app) {
     if (app->msg_send_pending) return;
+    if (!app->history.path[0]) {
+        bm_toast_push(app, "发送记录不可用，未开始群发", "请检查 sent-history.json 后重启", CUI_TONE_WARNING);
+        release_send_queue(app);
+        return;
+    }
     if (app->store.guards.count == 0) {
         int failed = app->msg_remain_list.count;
         bm_diagnostics_event(BM_EVENT_BATCH_FINISH, BM_LOG_INFO, 0, failed);
@@ -138,14 +155,13 @@ static void trigger_next_send_step(bm_app *app) {
         return;
     }
     d->login = app->store.login;
-    d->target = app->store.guards.items[0];
+    bm_strlcpy(d->sent.sender_uid, d->login.DedeUserID, sizeof d->sent.sender_uid);
+    d->sent.target = app->store.guards.items[0];
     d->roster_generation = app->guard_roster_generation;
-    d->use_code = use_code;
     d->interval_ms = app->store.send_interval > 0 ? app->store.send_interval : 1000;
 
-    const char *code_str = (use_code && app->store.code_count > 0) ? app->store.codes[0].code : "";
-    bm_strlcpy(d->code_used, code_str, sizeof d->code_used);
-    bm_template_process_today(tpl, &d->target, code_str, d->message, sizeof d->message);
+    if (use_code) bm_strlcpy(d->sent.code, app->store.codes[0].code, sizeof d->sent.code);
+    bm_template_process_today(tpl, &d->sent.target, d->sent.code, d->message, sizeof d->message);
 
     app->msg_send_pending = true;
     if (!bm_job_spawn(send_step_worker, d)) {
@@ -160,6 +176,7 @@ static void trigger_next_send_step(bm_app *app) {
 typedef struct {
     bm_login_info login;
     bm_sent_msg item;
+    int index;
     int interval_ms;
     bool is_single;
     bool skipped_timeout;
@@ -169,27 +186,43 @@ typedef struct {
 
 static void trigger_next_recall_step(bm_app *app);
 
+static bool can_recall_msg(const bm_sent_msg *m, const bm_login_info *login, int64_t now) {
+    return login->has_login && m->sender_uid[0] && !strcmp(m->sender_uid, login->DedeUserID)
+        && m->msg_key[0] && m->timestamp_ms > 0 && now >= m->timestamp_ms && now - m->timestamp_ms <= 120000;
+}
+
 static void on_recall_step_done(void *raw, void *user) {
     recall_step_job *d = (recall_step_job *)raw;
     bm_app *app = (bm_app *)user;
+    app->msg_recall_pending = false;
     bm_diagnostics_event(BM_EVENT_MESSAGE_RECALL, d->ok ? BM_LOG_INFO : BM_LOG_WARNING,
                          d->skipped_timeout ? 120 : d->err.code, 1);
 
     if (d->skipped_timeout) {
         char title[160];
-        snprintf(title, sizeof title, "撤回发给 %s 的消息失败", d->item.username);
+        snprintf(title, sizeof title, "撤回发给 %s 的消息失败", d->item.target.username);
         bm_toast_push(app, title, "消息发送已超过 2 分钟，无法撤回", CUI_TONE_WARNING);
     } else if (!d->ok) {
         char title[160];
-        snprintf(title, sizeof title, "撤回发给 %s 的消息失败", d->item.username);
+        snprintf(title, sizeof title, "撤回发给 %s 的消息失败", d->item.target.username);
         bm_toast_push(app, title, d->err.message, CUI_TONE_DANGER);
-    } else if (d->is_single) {
-        char title[160];
-        snprintf(title, sizeof title, "已撤回发给 %s 的私信", d->item.username);
-        bm_toast_push(app, title, NULL, CUI_TONE_SUCCESS);
+    } else {
+        /* One recall in flight. Records can be cleared, but not reordered. */
+        if (d->index < app->history.count) {
+            bm_sent_msg *at = &app->history.items[d->index];
+            memmove(at, at + 1, (size_t)(app->history.count - d->index - 1) * sizeof *at);
+            app->history.count--;
+            save_sent_history(app);
+        }
+        if (d->is_single) {
+            char title[160];
+            snprintf(title, sizeof title, "已撤回发给 %s 的私信", d->item.target.username);
+            bm_toast_push(app, title, NULL, CUI_TONE_SUCCESS);
+        }
     }
 
     if (!d->is_single) {
+        if (!d->ok) app->msg_recall_cursor++;
         app->msg_progress_index++;
         free(d);
         if (app->msg_in_progress && app->msg_is_recalling) {
@@ -203,10 +236,10 @@ static void on_recall_step_done(void *raw, void *user) {
 static void recall_step_worker(void *raw) {
     recall_step_job *d = (recall_step_job *)raw;
     int64_t now_ms = bm_now_ms();
-    if (d->item.timestamp_ms > 0 && (now_ms - d->item.timestamp_ms) > 120000) {
+    if (!can_recall_msg(&d->item, &d->login, now_ms)) {
         d->skipped_timeout = true;
     } else {
-        d->ok = bm_bili_recall_message(&d->login, d->item.uid, d->item.msg_key, &d->err);
+        d->ok = bm_bili_recall_message(&d->login, d->item.target.uid, d->item.msg_key, &d->err);
         if (!d->is_single && d->interval_ms > 0) {
             bm_sleep_ms((uint32_t)d->interval_ms);
         }
@@ -214,48 +247,46 @@ static void recall_step_worker(void *raw) {
     bm_job_post_main(on_recall_step_done, d);
 }
 
-static void trigger_next_recall_step(bm_app *app) {
-    if (app->sent_msg_count <= 0) {
-        app->msg_in_progress = false;
-        app->msg_is_recalling = false;
-        bm_toast_push(app, "批量撤回执行完毕", NULL, CUI_TONE_INFO);
-        return;
-    }
-
+static bool spawn_recall(bm_app *app, int idx, bool single) {
     recall_step_job *d = (recall_step_job *)calloc(1, sizeof *d);
-    if (!d) {
-        app->msg_in_progress = false;
-        app->msg_is_recalling = false;
-        return;
-    }
+    if (!d) return false;
     d->login = app->store.login;
-    d->item = app->sent_msgs[0];
+    d->item = app->history.items[idx];
+    d->index = idx;
     d->interval_ms = app->store.send_interval > 0 ? app->store.send_interval : 1000;
-    d->is_single = false;
-
-    remove_sent_msg_at(app, 0);
+    d->is_single = single;
 
     if (!bm_job_spawn(recall_step_worker, d)) {
         free(d);
-        app->msg_in_progress = false;
-        app->msg_is_recalling = false;
+        return false;
     }
+    app->msg_recall_pending = true;
+    return true;
+}
+
+static void trigger_next_recall_step(bm_app *app) {
+    int64_t now = bm_now_ms();
+    while (app->msg_recall_cursor < app->history.count &&
+           !can_recall_msg(&app->history.items[app->msg_recall_cursor], &app->store.login, now)) {
+        app->msg_recall_cursor++;
+    }
+    if (app->msg_recall_cursor >= app->history.count) {
+        bm_toast_push(app, "批量撤回执行完毕", NULL, CUI_TONE_INFO);
+    } else if (spawn_recall(app, app->msg_recall_cursor, false)) {
+        return;
+    } else {
+        bm_toast_push(app, "无法启动撤回任务", NULL, CUI_TONE_WARNING);
+    }
+    app->msg_in_progress = false;
+    app->msg_is_recalling = false;
 }
 
 static void start_single_recall(bm_app *app, int idx) {
-    if (idx < 0 || idx >= app->sent_msg_count) return;
-    if (!app->store.login.has_login) {
-        bm_toast_push(app, "请先登录账号", NULL, CUI_TONE_WARNING);
-        return;
+    if (idx < 0 || idx >= app->history.count || app->msg_recall_pending) return;
+    if (!can_recall_msg(&app->history.items[idx], &app->store.login, bm_now_ms())) return;
+    if (!spawn_recall(app, idx, true)) {
+        bm_toast_push(app, "无法启动撤回任务", NULL, CUI_TONE_WARNING);
     }
-    recall_step_job *d = (recall_step_job *)calloc(1, sizeof *d);
-    if (!d) return;
-    d->login = app->store.login;
-    d->item = app->sent_msgs[idx];
-    d->is_single = true;
-
-    remove_sent_msg_at(app, idx);
-    bm_job_spawn(recall_step_worker, d);
 }
 
 void bm_page_message(cui_ctx *ui, bm_app *app) {
@@ -404,7 +435,7 @@ void bm_page_message(cui_ctx *ui, bm_app *app) {
                 cui_row(ui, .gap = 10, .align = CUI_ALIGN_CENTER, .width = CUI_FILL) {
                     if (!app->msg_in_progress) {
                         if (cui_button(ui, "开始群发私信", .icon = CUI_ICON_SEND, .variant = CUI_BUTTON_PRIMARY,
-                                       .disabled = app->msg_send_pending || guard_cnt == 0 || !tpl_ready || !app->store.login.has_login)) {
+                                       .disabled = app->msg_send_pending || app->msg_recall_pending || guard_cnt == 0 || !tpl_ready || !app->store.login.has_login)) {
                             if (use_code && code_cnt < guard_cnt) {
                                 bm_toast_push(app, "兑换码数量不足", "请先补充兑换码或移除模板中的 {code} 标签", CUI_TONE_DANGER);
                             } else {
@@ -443,8 +474,8 @@ void bm_page_message(cui_ctx *ui, bm_app *app) {
         cui_card(ui, .width = CUI_GROW(5), .height = CUI_FILL, .pad = 0, .gap = 0) {
             int64_t now_ms = bm_now_ms();
             int recallable_cnt = 0;
-            for (int i = 0; i < app->sent_msg_count; i++) {
-                if (app->sent_msgs[i].timestamp_ms > 0 && (now_ms - app->sent_msgs[i].timestamp_ms) <= 120000) {
+            for (int i = 0; i < app->history.count; i++) {
+                if (can_recall_msg(&app->history.items[i], &app->store.login, now_ms)) {
                     recallable_cnt++;
                 }
             }
@@ -460,7 +491,7 @@ void bm_page_message(cui_ctx *ui, bm_app *app) {
                     cui_label(ui, "已发送记录与撤回中心");
                     cui_spacer(ui);
                     char sent_b[48];
-                    snprintf(sent_b, sizeof sent_b, "本轮已发 %d 条", app->sent_msg_count);
+                    snprintf(sent_b, sizeof sent_b, "共 %d 条记录", app->history.count);
                     cui_badge(ui, sent_b, .tone = CUI_TONE_NEUTRAL);
                     if (recallable_cnt > 0) {
                         char rec_b[48];
@@ -471,16 +502,18 @@ void bm_page_message(cui_ctx *ui, bm_app *app) {
 
                 cui_muted(ui, "Bilibili 仅支持撤回发送后 2 分钟（120 秒）内的私信，支持单条撤回或一键全部撤回");
 
-                cui_row(ui, .gap = 8, .width = CUI_FILL) {
+                cui_row(ui, .gap = 8, .width = CUI_FILL, .wrap = true) {
                     if (!app->msg_in_progress) {
-                        if (cui_button(ui, "一键撤回全部消息", .icon = CUI_ICON_ROTATE_CCW, .size = CUI_SIZE_SM,
-                                       .variant = CUI_BUTTON_DANGER, .width = CUI_GROW(1),
-                                       .disabled = app->msg_send_pending || app->sent_msg_count == 0)) {
-                            app->msg_in_progress = true;
-                            app->msg_is_recalling = true;
-                            app->msg_progress_index = 0;
-                            app->msg_total_count = app->sent_msg_count;
-                            trigger_next_recall_step(app);
+                        cui_disabled_scope(ui, app->msg_send_pending || app->msg_recall_pending || recallable_cnt == 0) {
+                            if (cui_confirm_button(ui, "一键撤回全部消息", .confirm_label = "确认全部撤回",
+                                                   .icon = CUI_ICON_ROTATE_CCW, .size = CUI_SIZE_SM, .variant = CUI_BUTTON_DANGER)) {
+                                app->msg_in_progress = true;
+                                app->msg_is_recalling = true;
+                                app->msg_progress_index = 0;
+                                app->msg_total_count = recallable_cnt;
+                                app->msg_recall_cursor = 0;
+                                trigger_next_recall_step(app);
+                            }
                         }
                     } else if (app->msg_is_recalling) {
                         if (cui_button(ui, "停止批量撤回", .icon = CUI_ICON_PAUSE, .size = CUI_SIZE_SM,
@@ -490,15 +523,21 @@ void bm_page_message(cui_ctx *ui, bm_app *app) {
                         }
                     }
 
-                    if (cui_confirm_button(ui, "清空记录", .confirm_label = "确认清空", .icon = CUI_ICON_TRASH_2, .size = CUI_SIZE_SM)) {
-                        app->sent_msg_count = 0;
+                    if (cui_button(ui, "导出 CSV", .icon = CUI_ICON_DOWNLOAD, .size = CUI_SIZE_SM,
+                                   .variant = CUI_BUTTON_OUTLINE, .disabled = app->history.count == 0)) {
+                        export_sent_history(app);
+                    }
+                    cui_disabled_scope(ui, app->history.count == 0) {
+                        if (cui_confirm_button(ui, "清空记录", .confirm_label = "确认清空", .icon = CUI_ICON_TRASH_2, .size = CUI_SIZE_SM)) {
+                            clear_sent_history(app);
+                        }
                     }
                 }
             }
 
             cui_separator(ui);
 
-            if (app->sent_msg_count == 0) {
+            if (app->history.count == 0) {
                 cui_box(ui, .width = CUI_FILL, .height = CUI_FILL, .align = CUI_ALIGN_CENTER, .justify = CUI_JUSTIFY_CENTER) {
                     cui_empty_state(ui, "暂无已发送私信记录", .icon = CUI_ICON_MESSAGE_SQUARE,
                                     .description = "群发私信开始后，每一条送达的私信都会在此处实时显示，并可在 120 秒内随时撤回");
@@ -506,21 +545,21 @@ void bm_page_message(cui_ctx *ui, bm_app *app) {
             } else {
                 int first = 0, last = 0;
                 int single_recall_idx = -1;
-                cui_virtual_list(ui, "sent_msgs_vlist", app->sent_msg_count, 52.0f, CUI_FILL, &first, &last) {
+                cui_virtual_list(ui, "sent_msgs_vlist", app->history.count, 52.0f, CUI_FILL, &first, &last) {
                     for (int i = first; i < last; i++) {
                         /* Show newest first */
-                        int r_idx = app->sent_msg_count - 1 - i;
-                        const bm_sent_msg *sm = &app->sent_msgs[r_idx];
+                        int r_idx = app->history.count - 1 - i;
+                        const bm_sent_msg *sm = &app->history.items[r_idx];
                         int64_t elapsed_s = sm->timestamp_ms > 0 ? (now_ms - sm->timestamp_ms) / 1000 : 999;
-                        bool can_recall = (elapsed_s >= 0 && elapsed_s <= 120);
+                        bool can_recall = can_recall_msg(sm, &app->store.login, now_ms);
 
-                        cui_push_id_int(ui, r_idx);
+                        cui_push_id(ui, sm->msg_key);
                         cui_row(ui, .width = CUI_FILL, .height = CUI_PX(52.0f), .pad_x = 14, .gap = 8, .align = CUI_ALIGN_CENTER) {
                             cui_column(ui, .width = CUI_FILL, .gap = 2) {
                                 cui_row(ui, .gap = 6, .align = CUI_ALIGN_CENTER) {
-                                    cui_text(ui, sm->username, .font = CUI_FONT_MEDIUM, .size = 13, .nowrap = true);
+                                    cui_text(ui, sm->target.username, .font = CUI_FONT_MEDIUM, .size = 13, .nowrap = true);
                                     char uid_str[32];
-                                    snprintf(uid_str, sizeof uid_str, "UID %llu", (unsigned long long)sm->uid);
+                                    snprintf(uid_str, sizeof uid_str, "UID %llu", (unsigned long long)sm->target.uid);
                                     cui_muted(ui, uid_str);
                                 }
                                 char key_str[96];
@@ -532,12 +571,14 @@ void bm_page_message(cui_ctx *ui, bm_app *app) {
                                 char rem_txt[48];
                                 snprintf(rem_txt, sizeof rem_txt, "剩余 %llds", (long long)(120 - elapsed_s));
                                 cui_badge(ui, rem_txt, .tone = CUI_TONE_SUCCESS);
-                                if (cui_button(ui, "撤回", .icon = CUI_ICON_ROTATE_CCW, .size = CUI_SIZE_SM,
-                                               .variant = CUI_BUTTON_OUTLINE, .disabled = app->msg_in_progress)) {
-                                    single_recall_idx = r_idx;
+                                cui_disabled_scope(ui, app->msg_in_progress || app->msg_send_pending || app->msg_recall_pending) {
+                                    if (cui_confirm_button(ui, "撤回", .confirm_label = "确认撤回", .icon = CUI_ICON_ROTATE_CCW,
+                                                           .size = CUI_SIZE_SM, .variant = CUI_BUTTON_OUTLINE)) {
+                                        single_recall_idx = r_idx;
+                                    }
                                 }
                             } else {
-                                cui_badge(ui, "已超 2 分钟", .tone = CUI_TONE_NEUTRAL);
+                                cui_badge(ui, elapsed_s >= 120 ? "已超 2 分钟" : "不可撤回", .tone = CUI_TONE_NEUTRAL);
                             }
                         }
                         cui_pop_id(ui);

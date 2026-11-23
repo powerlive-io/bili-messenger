@@ -26,6 +26,11 @@ include(third_party/CUI/cmake/CuiApp.cmake)
 find_package(CURL REQUIRED)
 find_package(Threads REQUIRED)
 
+if(MSVC)
+    # CUI expects UTF-8, including Chinese dialog labels and default filenames.
+    add_compile_options("$<$<COMPILE_LANGUAGE:C>:/utf-8>")
+endif()
+
 # --- core library: everything except the window, so the tests can link it ----
 add_library(bm_core STATIC
     src/core/util.c
@@ -36,6 +41,7 @@ add_library(bm_core STATIC
     src/core/feedback.c
     src/core/jobs.c
     src/core/store.c
+    src/core/sent_history.c
     src/core/bili.c
     src/core/guards.c
     third_party/cjson/cJSON.c
@@ -118,7 +124,8 @@ if(BM_BUILD_TESTS)
     add_executable(bm_guard_import_ui_tests tests/test_guard_import_ui.c src/ui/fonts.c)
     target_link_libraries(bm_guard_import_ui_tests PRIVATE bm_core cui::cui)
     target_include_directories(bm_guard_import_ui_tests PRIVATE third_party/CUI/src)
-    add_executable(bm_message_tests tests/test_message.c src/ui/common.c src/ui/fonts.c)
+    add_executable(bm_message_tests tests/test_message.c src/ui/common.c src/ui/fonts.c src/pages/codes.c)
+    target_include_directories(bm_message_tests PRIVATE third_party/CUI/src)
     target_link_libraries(bm_message_tests PRIVATE bm_core cui::cui)
     # Test assertions (including calls under test) must run in Release too.
     if(MSVC)
@@ -144,9 +151,9 @@ if(BM_BUILD_TESTS)
     add_test(NAME bm_message_tests COMMAND bm_message_tests)
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
-        add_test(NAME bm_guard_export
-            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_guard_export.py
-                    $<TARGET_FILE:bm_guard_import_ui_tests>)
+        add_test(NAME bm_unicode_file_paths
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_unicode_file_paths.py
+                    $<TARGET_FILE:bm_guard_import_ui_tests> $<TARGET_FILE:bm_message_tests>)
         add_test(NAME bm_feedback_http
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_feedback_http.py
                     $<TARGET_FILE:bm_feedback_tests>)

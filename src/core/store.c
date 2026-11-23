@@ -289,7 +289,7 @@ static bool store_save(const bm_store *s) {
     char *text = cJSON_Print(root);
     cJSON_Delete(root);
     if (!text) return false;
-    bool ok = bm_write_file(s->path, text, strlen(text));
+    bool ok = bm_write_private_file_atomic(s->path, text, strlen(text));
     free(text);
     return ok;
 }

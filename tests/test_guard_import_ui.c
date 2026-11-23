@@ -19,6 +19,7 @@ static void *pending_job;
 static char last_toast[256];
 static char last_toast_desc[256];
 static const char *export_dir;
+static const char *import_path;
 static bool rename_export;
 
 static void test_date_today(int *y, int *m, int *d) {
@@ -56,6 +57,10 @@ bool bm_guard_filter_chip(cui_ctx *ui, const char *id, int level, const char *la
 }
 cui_texture bm_image_get(cui_ctx *ui, const char *url, int *w, int *h) { return 0; }
 bool cui_app_file_dialog(cui_app *app, const cui_file_dialog_opts *opts, char *out, size_t cap) {
+    if (opts->kind == CUI_FILE_OPEN) {
+        assert(import_path && bm_strlcpy(out, import_path, cap) < cap);
+        return true;
+    }
     assert(export_dir && opts->kind == CUI_FILE_SAVE);
     int n = rename_export ? snprintf(out, cap, "%s/舰长名单.%s", export_dir, opts->filter)
                           : snprintf(out, cap, "%s/%s", export_dir, opts->default_name);
@@ -297,13 +302,15 @@ static void test_export(void) {
         assert(bm_guard_list_push(&app->store.guards, &g));
     }
 
-    export_dir = "中文目录";
+    export_dir = "中文目录/六月 福利";
     for (int i = 0; i < 2; ++i) {
         rename_export = i != 0;
         export_txt_action(app);
         assert(!strcmp(last_toast, "导出 TXT 成功"));
+        assert(!strcmp(last_toast_desc, rename_export ? "舰长名单.txt" : "12345-2026-01-15.txt"));
         export_csv_action(app);
         assert(!strcmp(last_toast, "导出 CSV 成功"));
+        assert(!strcmp(last_toast_desc, rename_export ? "舰长名单.csv" : "12345-2026-01-15.csv"));
     }
     export_dir = "missing";
     export_txt_action(app);
@@ -314,8 +321,39 @@ static void test_export(void) {
     free(app);
 }
 
+static void test_unicode_roster_imports(void) {
+    bm_app *app = calloc(1, sizeof *app);
+    assert(app);
+    strcpy(app->store.room_id, "12345");
+    import_path = "中文目录/六月 福利/选择名单.txt";
+    open_import_file_dialog(app);
+    assert(app->store.original_guards.count == 1);
+    assert(!strcmp(app->store.original_guards.items[0].username, "小林"));
+
+    cui_sw_renderer *renderer = cui_sw_create();
+    cui_ctx *ui = cui_create(&(cui_ctx_desc){.renderer = cui_sw_iface(renderer)});
+    assert(ui);
+    cui_set_viewport(ui, 1280, 760, 1);
+    cui_set_reduced_motion(ui, true);
+    app->import_guard_dialog = true;
+    app->import_guard_tab = 2;
+    frame(ui, app, 4);
+    cui_rect r = dialog_rect(ui, "guard_file_dropzone");
+    assert(r.w > 0 && r.h > 0);
+    const char *dropped = "中文目录/六月 福利/拖入名单.csv";
+    cui_input_file_drop(ui, &dropped, 1, r.x + r.w / 2, r.y + r.h / 2);
+    frame(ui, app, 2);
+    assert(!strcmp(last_toast, "拖拽导入成功") && app->store.original_guards.count == 1);
+    assert(!strcmp(app->store.original_guards.items[0].username, "小周"));
+    cui_destroy(ui);
+    cui_sw_destroy(renderer);
+    bm_store_free(&app->store);
+    free(app);
+}
+
 int main(int argc, char **argv) {
-    if (argc == 2 && !strcmp(argv[1], "--export")) {
+    if (argc == 2 && !strcmp(argv[1], "--unicode-files")) {
+        test_unicode_roster_imports();
         test_export();
         return 0;
     }

@@ -16,6 +16,7 @@
 #include <direct.h>
 #include <windows.h>
 #else
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -48,6 +49,15 @@ char *bm_strdup(const char *s) {
     char *copy = (char *)malloc(len + 1);
     if (copy) memcpy(copy, s, len + 1);
     return copy;
+}
+
+const char *bm_path_filename(const char *path) {
+    const char *slash = strrchr(path, '/');
+#if defined(_WIN32)
+    const char *backslash = strrchr(path, '\\');
+    if (backslash && (!slash || backslash > slash)) slash = backslash;
+#endif
+    return slash ? slash + 1 : path;
 }
 
 char *bm_trim(char *s) {
@@ -309,7 +319,11 @@ int64_t bm_ymd_to_days(int y, int m, int d) {
 int64_t bm_now_ms(void) {
     if (g_now_ms_hook) return g_now_ms_hook(g_time_hook_user);
 #if defined(_WIN32)
-    return (int64_t)GetTickCount64();
+    /* FILETIME counts 100 ns ticks since 1601; expose Unix ms on all platforms. */
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    uint64_t ticks = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+    return (int64_t)(ticks / 10000) - 11644473600000LL;
 #else
     struct timeval tv;
     gettimeofday(&tv, NULL);
@@ -391,9 +405,7 @@ bool bm_default_config_path(char *out, size_t cap) {
 #endif
 }
 
-static bool read_file(const char *path, char **out_buf, size_t *out_len) {
-    if (!path || !out_buf) return false;
-    FILE *f = fopen(path, "rb");
+static bool read_file(FILE *f, char **out_buf, size_t *out_len) {
     if (!f) return false;
     if (fseek(f, 0, SEEK_END) != 0) {
         fclose(f);
@@ -418,12 +430,18 @@ static bool read_file(const char *path, char **out_buf, size_t *out_len) {
     return true;
 }
 
-bool bm_read_file(const char *path, char **out_buf, size_t *out_len) {
+static bool read_and_log(FILE *f, char **out_buf, size_t *out_len) {
     size_t bytes = 0;
-    bool ok = read_file(path, out_buf, &bytes);
+    bool ok = read_file(f, out_buf, &bytes);
+    int error = errno;
     if (ok && out_len) *out_len = bytes;
     bm_diagnostics_event(BM_EVENT_FILE_READ, ok ? BM_LOG_INFO : BM_LOG_WARNING, ok ? 0 : 1, (int64_t)bytes);
+    if (!ok) errno = error;
     return ok;
+}
+
+bool bm_read_file(const char *path, char **out_buf, size_t *out_len) {
+    return read_and_log(path && out_buf ? fopen(path, "rb") : NULL, out_buf, out_len);
 }
 
 static bool write_and_close(FILE *f, const void *data, size_t len) {
@@ -440,19 +458,61 @@ bool bm_write_file(const char *path, const void *data, size_t len) {
     return write_and_close(path ? fopen(path, "wb") : NULL, data, len);
 }
 
-bool bm_write_file_utf8(const char *path, const void *data, size_t len) {
+bool bm_write_private_file_atomic(const char *path, const void *data, size_t len) {
+    char tmp[1200];
+    int n = snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    if (n < 0 || (size_t)n >= sizeof tmp) return false;
+#ifdef _WIN32
+    FILE *f = fopen(tmp, "wb");
+#else
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    FILE *f = NULL;
+    if (fd >= 0) {
+        if (fchmod(fd, 0600) == 0) f = fdopen(fd, "wb");
+        if (!f) close(fd);
+    }
+#endif
+    if (!f) return false;
+    bool ok = fwrite(data, 1, len, f) == len && fflush(f) == 0;
+#ifndef _WIN32
+    if (fsync(fileno(f)) != 0) ok = false;
+#endif
+    if (fclose(f) != 0) ok = false;
+#ifdef _WIN32
+    if (ok) ok = MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+    if (ok) ok = rename(tmp, path) == 0;
+#endif
+    if (!ok) remove(tmp);
+    return ok;
+}
+
+/* User-selected paths are UTF-8 (both native dialogs and file drops). */
+static FILE *open_utf8(const char *path, bool write) {
 #if defined(_WIN32)
     FILE *f = NULL;
     int count = path ? MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0) : 0;
     if (count > 0) {
         wchar_t *wide = malloc((size_t)count * sizeof *wide);
         if (wide && MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, count)) {
-            f = _wfopen(wide, L"wb");
+            f = _wfopen(wide, write ? L"wb" : L"rb");
         }
         free(wide);
     }
-    return write_and_close(f, data, len);
+    return f;
 #else
-    return bm_write_file(path, data, len);
+    return path ? fopen(path, write ? "wb" : "rb") : NULL;
 #endif
+}
+
+bool bm_read_file_utf8(const char *path, char **out_buf, size_t *out_len) {
+    return read_and_log(out_buf ? open_utf8(path, false) : NULL, out_buf, out_len);
+}
+
+FILE *bm_open_write_utf8(const char *path) {
+    return open_utf8(path, true);
+}
+
+bool bm_write_file_utf8(const char *path, const void *data, size_t len) {
+    return write_and_close(bm_open_write_utf8(path), data, len);
 }

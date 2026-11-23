@@ -315,7 +315,7 @@ void bm_page_about(cui_ctx *ui, bm_app *app) {
             snprintf(s2, sizeof s2, "%d 人", app->store.guards.count);
             snprintf(s3, sizeof s3, "%d 个", app->store.template_count);
             snprintf(s4, sizeof s4, "%d 个", app->store.code_count);
-            snprintf(s5, sizeof s5, "%d 条", app->sent_msg_count);
+            snprintf(s5, sizeof s5, "%d 条", app->history.count);
 
             cui_list_item(ui, "原始舰长名单池", .icon = CUI_ICON_USERS, .trailing = s1);
             cui_list_item(ui, "当前筛选待发目标", .icon = CUI_ICON_FILTER, .trailing = s2);
