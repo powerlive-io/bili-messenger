@@ -210,9 +210,22 @@ static void on_recall_step_done(void *raw, void *user) {
         /* One recall in flight. Records can be cleared, but not reordered. */
         if (d->index < app->history.count) {
             bm_sent_msg *at = &app->history.items[d->index];
-            memmove(at, at + 1, (size_t)(app->history.count - d->index - 1) * sizeof *at);
+            size_t tail_bytes = (size_t)(app->history.count - d->index - 1) * sizeof *at;
+            memmove(at, at + 1, tail_bytes);
             app->history.count--;
-            save_sent_history(app);
+            if (!bm_sent_history_save(&app->history)) {
+                /* The remote recall succeeded, but the on-disk removal did not. */
+                memmove(at + 1, at, tail_bytes);
+                *at = d->item;
+                app->history.count++;
+                bm_toast_push(app, "私信已撤回，本地记录未删除", "请检查目录权限和可用空间，无需再次撤回", CUI_TONE_WARNING);
+                if (!d->is_single) {
+                    app->msg_in_progress = false;
+                    app->msg_is_recalling = false;
+                }
+                free(d);
+                return;
+            }
         }
         if (d->is_single) {
             char title[160];

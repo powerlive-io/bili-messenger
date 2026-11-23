@@ -471,6 +471,35 @@ static void test_persistent_recall(void) {
     destroy_app(app);
 }
 
+static void test_recall_save_failure(void) {
+    bm_app *app = new_app();
+    assert(bm_store_save(&app->store));
+    for (int i = 0; i < 3; i++) {
+        bm_sent_msg m = {.sender_uid = "42", .timestamp_ms = bm_now_ms()};
+        snprintf(m.msg_key, sizeof m.msg_key, "key-%d", i);
+        assert(bm_sent_history_append(&app->history, &m));
+    }
+    assert(bm_sent_history_save(&app->history));
+    /* Use an existing regular file as a parent: opening the temp file must fail. */
+    snprintf(app->history.path, sizeof app->history.path, "%s/no-file", history_path);
+    for (int single = 0; single <= 1; single++) {
+        app->msg_in_progress = app->msg_is_recalling = !single;
+        assert(spawn_recall(app, 1, single != 0));
+        recall_step_job *job = pending_job;
+        pending_job = NULL;
+        job->ok = true;
+        on_recall_step_done(job, app);
+        assert(!pending_job && !app->msg_recall_pending && !app->msg_in_progress);
+        assert(app->toasts[app->toast_count - 1].tone == CUI_TONE_WARNING);
+        bm_sent_history disk = {0};
+        assert(bm_sent_history_open(&disk, history_path));
+        assert(disk.count == 3 && app->history.count == 3);
+        for (int i = 0; i < disk.count; i++) assert(!strcmp(disk.items[i].msg_key, app->history.items[i].msg_key));
+        bm_sent_history_free(&disk);
+    }
+    destroy_app(app);
+}
+
 static void test_independent_history_file(void) {
     bm_app *app = new_app();
     assert(bm_write_file(history_path, "{bad", 4));
@@ -605,6 +634,7 @@ int main(int argc, char **argv) {
     test_duplicate_uid_filters();
     test_sent_export();
     test_persistent_recall();
+    test_recall_save_failure();
     test_independent_history_file();
     test_long_toast_layout();
     test_history_confirmations();
