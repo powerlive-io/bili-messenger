@@ -17,6 +17,10 @@ static bm_app app;
 static cui_ctx *ui;
 static int64_t now = 1700000000000LL;
 static bool scanned;
+static bool expired_account;
+static bool room_offline;
+static unsigned feedback_attempts;
+static char opened_url[512];
 
 #define COVER_URL "https://fixture.invalid/cover.png"
 #define RECEIPT "73652d4a-60ea-4435-93fd-b22fa2609b79"
@@ -36,15 +40,23 @@ static bool offline_http(const bm_http_req *req, bm_http_resp *resp, void *unuse
                        : "{\"data\":{\"code\":86090}}";
     } else if (strstr(url, "/space/info?uid=42&")) {
         assert(strstr(req->cookie, "DedeUserID=42"));
-        body = "{\"code\":0,\"data\":{\"mid\":42,\"uname\":\"Test Anchor\"}}";
+        body = expired_account ? "{\"code\":-101,\"message\":\"expired\"}"
+                               : "{\"code\":0,\"data\":{\"mid\":42,\"uname\":\"Test Anchor\"}}";
+    } else if (strstr(url, "/space/info?uid=77&")) {
+        body = "{\"code\":0,\"data\":{\"mid\":77,\"uname\":\"Guest\"}}";
+    } else if (strstr(url, "/search/type?keyword=Guest&")) {
+        body = "{\"code\":0,\"data\":{\"result\":[{\"mid\":77,\"uname\":\"Guest\"}]}}";
+    } else if (strstr(url, "/search/type?keyword=Missing&")) {
+        body = "{\"code\":0,\"data\":{\"result\":[]}}";
     } else if (strstr(url, "getH5InfoByRoom?room_id=123")) {
-        body = "{\"code\":0,\"data\":{\"room_info\":{\"room_id\":12345,\"uid\":42,"
+        body = room_offline ? "{\"code\":0,\"data\":{\"room_info\":{\"room_id\":12345,\"uid\":42}}}"
+               : "{\"code\":0,\"data\":{\"room_info\":{\"room_id\":12345,\"uid\":42,"
                "\"title\":\"Test Room\",\"cover\":\"" COVER_URL "\",\"online\":321,\"live_status\":1},"
                "\"anchor_info\":{\"base_info\":{\"uname\":\"Test Anchor\"},\"relation_info\":{\"attention\":100}}}}";
     } else if (strstr(url, "getH5InfoByRoom?room_id=404")) {
         body = "{\"code\":-1}";
     } else if (strstr(url, "/bulkGuard/42") || strstr(url, "/bulkActiveSome/42")) {
-        body = "[{\"time\":1700000000000,\"guardNum\":2,\"follower\":100},"
+        body = room_offline ? "[]" : "[{\"time\":1700000000000,\"guardNum\":2,\"follower\":100},"
                "{\"time\":1700086400000,\"guardNum\":5,\"follower\":140},"
                "{\"time\":1700172800000,\"guardNum\":3,\"follower\":120}]";
     } else if (strstr(url, "/day?room=123")) {
@@ -56,11 +68,31 @@ static bool offline_http(const bm_http_req *req, bm_http_resp *resp, void *unuse
         body = "{\"code\":0,\"data\":{\"list\":[{\"uid\":72,\"username\":\"Bob\",\"guard_level\":3}]}}";
     } else if (strstr(url, "/history?room=123&date=2020-01-01")) {
         body = "{\"Code\":0,\"Data\":[{\"Uid\":\"81\",\"Username\":\"Carol\",\"Guard_level\":\"2\"}]}";
+    } else if (strstr(url, "/history?room=123&date=2020-01-02")) {
+        body = "{\"Code\":404}";
+    } else if (strstr(url, "/giftStream/getReceivedGiftStream")) {
+        assert(strstr(req->cookie, "DedeUserID=42"));
+        body = "{\"code\":0,\"data\":{\"ready\":1,\"total_page\":1,\"list\":["
+               "{\"uid\":\"77\",\"uname\":\"Guest\",\"goods_id\":900,\"name\":\"other\"},"
+               "{\"uid\":77,\"uname\":\"Guest\",\"goods_id\":5},"
+               "{\"uid\":81,\"uname\":\"Carol\",\"goods_id\":6}]}}";
     } else if (!strcmp(url, COVER_URL)) {
         assert(bm_read_file("cover.png", &resp->data, &resp->size));
     } else if (!strcmp(url, "https://api.powerlive.io/feedback/prepare")) {
         assert(!req->cookie);
-        body = "{\"already_submitted\":true,\"id\":\"" RECEIPT "\"}";
+        feedback_attempts++;
+        body = "{\"upload_token\":\"fixture\",\"expires_at\":\"2099-01-01T00:00:00Z\","
+               "\"max_file_bytes\":5242880,\"max_request_bytes\":11534336}";
+    } else if (!strcmp(url, "https://api.powerlive.io/feedback")) {
+        assert(req->part_count == 2 && !strcmp(req->parts[0].data, "Offline workflow test"));
+        assert(!strcmp(req->parts[1].filename, "diagnostics.log") && req->parts[1].size > 0);
+        if (feedback_attempts == 1) {
+            resp->status = 503;
+            resp->retry_after_seconds = 60;
+            body = "{\"error\":\"feedback_unavailable\"}";
+        } else {
+            body = "{\"id\":\"" RECEIPT "\"}";
+        }
     } else {
         fprintf(stderr, "Unexpected fixture request: %s\n", url);
         abort();
@@ -71,11 +103,15 @@ static bool offline_http(const bm_http_req *req, bm_http_resp *resp, void *unuse
         resp->size = strlen(body);
     }
     resp->ok = true;
-    resp->status = 200;
+    if (!resp->status) resp->status = 200;
     return true;
 }
 
-bool cui_app_open_url(const char *url) { (void)url; abort(); }
+bool cui_app_open_url(const char *url) {
+    assert(!opened_url[0]); /* Each expected navigation must be consumed. */
+    bm_strlcpy(opened_url, url, sizeof opened_url);
+    return true;
+}
 bool cui_app_file_dialog(cui_app *a, const cui_file_dialog_opts *o, char *out, size_t cap) {
     (void)a; (void)o; (void)out; (void)cap; abort();
 }
@@ -118,6 +154,12 @@ static void click_rect(cui_rect r) {
 
 static void click(const char *label) { click_rect(text_rect(label)); }
 
+static void check_link(const char *label, const char *expected) {
+    click(label);
+    assert(!strcmp(opened_url, expected));
+    opened_url[0] = '\0';
+}
+
 static void test_onboarding(void) {
     assert(!app.store.room_id[0] && !app.store.login.has_login);
     bm_setting_startup_checks(&app);
@@ -154,6 +196,8 @@ static void test_onboarding(void) {
 static void test_room_and_roster(void) {
     click("数据总览");
     assert(app.page == BM_PAGE_SUMMARY);
+    check_link("主播空间", "https://space.bilibili.com/42");
+    check_link("进入直播间", "https://live.bilibili.com/123");
     text_rect("最低 2 · 最高 5 · 最新 3");
     click("舰长趋势");
     text_rect("区间最高：5");
@@ -178,6 +222,57 @@ static void test_room_and_roster(void) {
     assert(!app.guard_loading && !app.import_guard_dialog && app.store.guards.count == 1);
     assert(app.store.guards.items[0].uid == 81 && app.stats.type2 == 1);
     text_rect("Carol");
+}
+
+static void add_target(const char *keyword, const char *title, bool by_name) {
+    click("获取 / 导入名单");
+    click("手动添加");
+    click(by_name ? "按用户名搜索 (需已登录)" : "按 UID 精确查找");
+    strcpy(app.add_guard_keyword, keyword);
+    strcpy(app.add_guard_title, title);
+    frame();
+    click("确认添加并加入列表");
+    assert(!app.guard_loading && !app.import_guard_dialog);
+}
+
+static void test_edit_roster(void) {
+    /* A failed snapshot must not discard the working list. */
+    bm_guard_list_fetch_snapshot(&app, "2020-01-02");
+    drain_jobs();
+    assert(app.store.guards.count == 1 && app.store.guards.items[0].uid == 81);
+    add_target("   ", "", false);
+    add_target("not-a-number", "", false);
+    add_target("Missing", "", true);
+    assert(app.store.guards.count == 1);
+    add_target(" 77 ", "Moderator", false);
+    assert(app.store.guards.count == 2 && app.store.guards.items[0].uid == 77);
+    assert(!strcmp(app.store.guards.items[0].custom_title, "Moderator"));
+    add_target("77", "", false);
+    add_target("Guest", "", true);
+    assert(app.store.original_guards.count == 2); /* Don't add duplicate by either key. */
+    strcpy(app.guard_search, "modEr");
+    frame();
+    text_rect("筛选出 1 / 2 人 · 已选 0 人");
+    check_link("空间", "https://space.bilibili.com/77");
+    check_link("私信", "https://message.bilibili.com/#/whisper/mid77");
+    click("全选当前");
+    click("删除选中 (1)");
+    assert(app.store.original_guards.count == 1 && app.store.guards.items[0].uid == 81);
+    click("清除搜索");
+    assert(!app.guard_search[0]);
+
+    click("获取 / 导入名单");
+    click("上舰流水");
+    click("开始拉取区间上舰流水");
+    assert(app.store.original_guards.count == 3 && app.stats.type3 == 1);
+    click("一键去重");
+    assert(app.store.original_guards.count == 2 && app.stats.type1 == 1 && app.stats.type3 == 0);
+    strcpy(app.guard_search, "77");
+    frame();
+    click("全选当前");
+    click("删除选中 (1)");
+    assert(app.store.guards.count == 1 && app.store.guards.items[0].uid == 81);
+    click("清除搜索");
 }
 
 static void test_codes_and_template(void) {
@@ -219,11 +314,25 @@ static void test_codes_and_template(void) {
 
 static void test_feedback_and_reopen(void) {
     click("关于软件");
+    check_link("关注 @轴伊Joi_Channel", "https://space.bilibili.com/61639371");
+    check_link("GitHub 仓库", "https://github.com/powerlive-io/bili-messenger");
+    check_link("作者 Bilibili (@Xinrea)", "https://space.bilibili.com/475210");
+    check_link("PowerLive 官网", "https://powerlive.io/");
     click("问题反馈");
     assert(app.feedback_dialog && !app.feedback_load_failed);
     strcpy(app.feedback.message, "Offline workflow test");
     frame();
     click("提交反馈");
+    assert(!app.feedback_busy && app.feedback_result.retryable && !app.feedback.receipt[0]);
+    assert(app.feedback.retry_at_ms == now + 60000);
+    char id[sizeof app.feedback.submission_id];
+    strcpy(id, app.feedback.submission_id);
+    click("重试原反馈");
+    assert(feedback_attempts == 1); /* Cooldown disables the button. */
+    now += 60000;
+    frame();
+    click("重试原反馈");
+    assert(feedback_attempts == 2 && !strcmp(app.feedback.submission_id, id));
     assert(!app.feedback_busy && app.feedback_result.ok && !strcmp(app.feedback.receipt, RECEIPT));
     text_rect(RECEIPT);
     bm_app_shutdown(&app, ui);
@@ -234,7 +343,107 @@ static void test_feedback_and_reopen(void) {
     assert(app.msg_template_idx == 0 && !strcmp(app.template_value_buf, "{name}{code}"));
     assert(app.store.code_count == 1 && !strcmp(app.store.codes[0].code, "KEEP"));
     assert(!app.feedback_load_failed && !strcmp(app.feedback.receipt, RECEIPT));
+    expired_account = true;
+    bm_setting_refresh_account(&app);
+    drain_jobs();
+    assert(!app.store.login.has_login && !app.account_profile.uname[0]);
     bm_app_shutdown(&app, ui);
+    bm_app_init(&app);
+    assert(!app.store.login.has_login && app.store.guards.count == 1 && app.store.template_count == 1);
+}
+
+static void test_account_recovery(void) {
+    expired_account = false;
+    app.page = BM_PAGE_SETTING;
+    app.login_tab = 1;
+    frame();
+    frame();
+    click("验证并保存 Cookie 登录");
+    assert(!app.store.login.has_login);
+    strcpy(app.manual_sessdata, "test-session");
+    strcpy(app.manual_uid, "42");
+    strcpy(app.manual_jct, "test-csrf");
+    frame();
+    click("验证并保存 Cookie 登录");
+    assert(app.store.login.has_login && !strcmp(app.account_profile.uname, "Test Anchor"));
+    check_link("个人空间", "https://space.bilibili.com/42");
+    click("重新校验状态");
+    assert(app.store.login.has_login && app.account_profile.mid == 42);
+    click("保守 2500ms");
+    assert(app.store.send_interval == 2500);
+    click("标准 1000ms");
+    assert(app.store.send_interval == 1000);
+    click("浅色模式");
+    assert(!app.store.dark_mode && cui_get_theme_mode(ui) == CUI_THEME_LIGHT);
+    click("琥珀金");
+    assert(app.accent_idx == 1);
+    click("紫罗兰");
+    assert(app.accent_idx == 3);
+    click("退出登录");
+    assert(app.store.login.has_login); /* First click only arms confirmation. */
+    click_rect(cui_get_rect(ui, cui_make_id(ui, "退出登录")));
+    assert(!app.store.login.has_login && !app.account_profile.uname[0]);
+    assert(app.store.original_guards.count == 1 && !strcmp(app.store.room_id, "123"));
+}
+
+static void run_command(const char *title) {
+    click("命令");
+    assert(app.cmd_palette_open);
+    cui_input_text(ui, title);
+    frame();
+    frame();
+    click(title);
+    assert(!app.cmd_palette_open);
+}
+
+static void test_workspace_commands(void) {
+    run_command("前往：目标列表");
+    assert(app.page == BM_PAGE_GUARD_LIST);
+    run_command("动作：拉取今日实时舰长快照");
+    assert(app.store.original_guards.count == 2 && app.stats.type1 == 1);
+    bm_guard duplicate = app.store.original_guards.items[0];
+    assert(bm_guard_list_push(&app.store.original_guards, &duplicate));
+    run_command("动作：目标列表一键去重");
+    assert(app.store.original_guards.count == 2 && app.store.guards.count == 2);
+    run_command("动作：切换深色 / 浅色主题");
+    assert(app.store.dark_mode && cui_get_theme_mode(ui) == CUI_THEME_DARK);
+    room_offline = true;
+    run_command("动作：刷新直播间与趋势数据");
+    click("房间 123");
+    assert(app.page == BM_PAGE_SUMMARY && app.room_info.live_status == 0);
+    text_rect("暂无 vtbs.moe 舰长历史数据");
+    click("舰长趋势");
+    text_rect("暂无 vtbs.moe 舰长历史数据");
+    click("粉丝趋势");
+    text_rect("暂无 vtbs.moe 粉丝历史数据");
+    click("前往群发私信");
+    assert(app.page == BM_PAGE_MESSAGE);
+    text_rect("兑换码不足 (1/2)");
+    click("跳过队首用户");
+    assert(app.store.guards.count == 1 && app.store.guards.items[0].uid == 72);
+}
+
+static void test_template_removal(void) {
+    click("编辑模板");
+    assert(app.page == BM_PAGE_TEMPLATE && app.store.template_count == 1);
+    click("新建模板");
+    click("保存模板");
+    assert(app.store.template_count == 2 && app.template_select_idx == 1);
+    assert(app.msg_template_idx == 0); /* Editing a second template doesn't switch the send queue. */
+    click("新模板 1");
+    assert(app.template_select_idx == 0 && !strcmp(app.template_value_buf, "{name}{code}"));
+    click("提督");
+    text_rect("示例提督伙伴KEEP");
+    click("删除");
+    assert(app.store.template_count == 2);
+    click_rect(cui_get_rect(ui, cui_make_id(ui, "删除")));
+    assert(app.store.template_count == 1 && app.template_select_idx == 0);
+    assert(!strcmp(app.msg_template_name, "新模板 2"));
+    click("删除");
+    click_rect(cui_get_rect(ui, cui_make_id(ui, "删除")));
+    assert(!app.store.template_count && app.msg_template_idx == -1 && !app.msg_template_name[0]);
+    click("私信群发");
+    text_rect("未选择有效模板");
 }
 
 int main(int argc, char **argv) {
@@ -259,8 +468,13 @@ int main(int argc, char **argv) {
 
     test_onboarding();
     test_room_and_roster();
+    test_edit_roster();
     test_codes_and_template();
     test_feedback_and_reopen();
+    test_account_recovery();
+    test_workspace_commands();
+    test_template_removal();
+    bm_app_shutdown(&app, ui);
     cui_destroy(ui);
     cui_sw_destroy(renderer);
     bm_jobs_shutdown();

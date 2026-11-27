@@ -150,6 +150,12 @@ if(BM_BUILD_TESTS)
     add_test(NAME bm_app_workflow COMMAND ${CMAKE_COMMAND}
         -DTEST_EXE=$<TARGET_FILE:bm_app_tests> -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_app_workflow.cmake)
     set_tests_properties(bm_app_workflow PROPERTIES TIMEOUT 30)
+    add_executable(bm_startup_tests tests/test_startup.c)
+    target_link_libraries(bm_startup_tests PRIVATE bm_ui)
+    add_test(NAME bm_startup COMMAND ${CMAKE_COMMAND}
+        -DTEST_EXE=$<TARGET_FILE:bm_startup_tests> -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_app_workflow.cmake)
+    set_tests_properties(bm_startup PROPERTIES TIMEOUT 30 ENVIRONMENT
+        "BM_PAGE=1;BM_THEME=light;BM_ACCENT=2;BM_IMPORT_DIALOG=1;BM_FEEDBACK_DIALOG=preview")
     add_test(NAME bm_tests COMMAND bm_tests)
     add_test(NAME bm_feedback_tests COMMAND bm_feedback_tests)
     add_test(NAME bm_feedback_ui_tests COMMAND bm_feedback_ui_tests)

@@ -3,7 +3,7 @@
 string(RANDOM LENGTH 12 suffix)
 set(home "${CMAKE_CURRENT_BINARY_DIR}/bm-test-home-${suffix}")
 file(MAKE_DIRECTORY "${home}")
-foreach(var HOME APPDATA XDG_CONFIG_HOME)
+foreach(var HOME APPDATA XDG_CONFIG_HOME BM_TEST_PROFILE)
     set(ENV{${var}} "${home}")
 endforeach()
 execute_process(COMMAND "${TEST_EXE}" "${home}" WORKING_DIRECTORY "${home}" RESULT_VARIABLE result)

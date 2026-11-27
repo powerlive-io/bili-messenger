@@ -82,9 +82,9 @@ python3 assets/icons/generate.py
 
 测试默认开启，可通过 `-DBM_BUILD_TESTS=OFF` 关闭。测试覆盖核心逻辑、反馈持久化、反馈界面及 HTTP 提交等行为，具体目标见 [CMakeLists.txt](../CMakeLists.txt)。
 
-### 复现 80% 行覆盖率检查
+### 复现行覆盖率检查
 
-[PR 检查](../.github/workflows/pr-check.yml)在 macOS 上要求 `src/` 中本次构建的应用代码**总行覆盖率不低于 80%**。核心库、页面、入口和平台窗口代码即使未被执行也计入分母；测试和第三方依赖不计入。不要求每个文件或分支分别达到 80%。
+[PR 检查](../.github/workflows/pr-check.yml)在 macOS 上要求 `src/` 中本次构建的应用代码**总行覆盖率不低于 93%**。核心库、页面、入口和平台窗口代码即使未被执行也计入分母；测试和第三方依赖不计入。门槛适用于总体可执行行，不是单文件或分支覆盖率。
 
 在仓库根目录执行（需要 Python 3 和前述构建依赖）：
 

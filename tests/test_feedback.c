@@ -406,6 +406,16 @@ static void test_errors(void) {
     bm_feedback_result r;
     bm_feedback_send(&d, &r, on_upload, NULL);
     assert(!r.ok && !strcmp(r.code, "network_error") && !uploads);
+    reset(&d);
+    d.retry_at_ms = 0;
+    replies[0] = "{\"error\":\"challenge_required\"}";
+    statuses[0] = 403;
+    bm_feedback_send(&d, &r, on_upload, NULL);
+    assert(!r.ok && r.retryable && d.retry_at_ms == now + 600000 && !uploads);
+    bm_feedback_edit(&d);
+    reset(&d);
+    bm_feedback_send(&d, &r, on_upload, NULL);
+    assert(!r.ok && !r.retryable && !strcmp(r.code, "invalid_draft") && calls == 0);
     puts("PASS API error codes, Retry-After, verification fallback and malformed prepare responses");
 }
 
@@ -423,6 +433,12 @@ static void test_persistence(void) {
     strcpy(d.receipt, RECEIPT);
     assert(bm_feedback_save(&d, path));
     assert(bm_feedback_load(&loaded, path) && strcmp(loaded.receipt, RECEIPT) == 0);
+    d.include_log = true;
+    strcpy(d.log, "bad\x01log");
+    assert(bm_feedback_save(&d, path) && !bm_feedback_load(&loaded, path));
+    assert(!loaded.include_log && !strcmp(loaded.receipt, RECEIPT));
+    d.include_log = false;
+    d.log[0] = '\0';
     char *text = NULL;
     assert(bm_read_file(path, &text, NULL));
     assert(!strstr(text, "upload_token") && !strstr(text, "SESSDATA"));
@@ -449,6 +465,19 @@ static void test_persistence(void) {
 /* Used by test_feedback_http.py to verify the real libcurl wire format and headers. */
 static int test_http_transport(const char *url) {
     bm_http_init();
+    char prepare_url[256];
+    snprintf(prepare_url, sizeof prepare_url, "%s/prepare", url);
+    bm_http_req prepare = {
+        .method = "POST", .url = prepare_url, .body = "{\"test\":true}",
+        .accept = "application/json", .content_type = "application/json",
+        .no_follow_redirect = true, .timeout_ms = 3000
+    };
+    bm_http_resp redirect;
+    assert(bm_http_request(&prepare, &redirect));
+    assert(redirect.status == 307 && !strcmp(redirect.location, "/unexpected"));
+    assert(redirect.set_cookie_count == 1 && !strcmp(redirect.set_cookies[0], "session=test; Path=/"));
+    assert(redirect.size == strlen("not followed") && !strcmp(redirect.data, "not followed"));
+    bm_http_resp_free(&redirect);
     const char *message = "中文 @foo; 问题\n第二行 😀";
     const char *headers[] = {"X-Feedback-Token: local-test-token"};
     const char *log = "UTF-8 诊断日志\nop=message_send_or_recall http=200 api=-101\n";

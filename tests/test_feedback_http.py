@@ -21,6 +21,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
     def do_POST(self):
+        if self.path == "/feedback/prepare":
+            # A redirect is an HTTP response, not an invitation to send the
+            # request body (or credentials) to a second destination.
+            try:
+                assert self.headers["Cookie"] is None
+                assert self.headers["Content-Type"] == "application/json"
+                assert self.headers["Accept"] == "application/json"
+                assert self.rfile.read(int(self.headers["Content-Length"])) == b'{"test":true}'
+            except Exception as error:
+                self.server.failures.append(repr(error))
+            self.send_response(307)
+            self.send_header("Location", "/unexpected")
+            self.send_header("Set-Cookie", "session=test; Path=/")
+            self.end_headers()
+            self.wfile.write(b"not followed")
+            return
         try:
             assert self.path == "/feedback"
             assert self.headers["Cookie"] is None

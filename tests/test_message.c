@@ -506,11 +506,62 @@ static void test_independent_history_file(void) {
     bm_sent_history_free(&app->history);
     assert(!bm_sent_history_open(&app->history, history_path));
     assert(!bm_sent_history_save(&app->history));
+    app->msg_in_progress = true;
+    trigger_next_send_step(app);
+    assert(!pending_job && !app->msg_in_progress && app->store.guards.count == 3);
     assert(bm_store_save(&app->store));
     char *text = NULL;
     assert(bm_read_file(history_path, &text, NULL) && !strcmp(text, "{bad"));
     free(text);
     destroy_app(app);
+}
+
+static void test_write_failure_stops_chain(void) {
+    for (int history_fails = 0; history_fails <= 1; history_fails++) {
+        bm_app *app = new_app();
+        assert(bm_store_save(&app->store));
+        start(app);
+        /* The parent is an existing regular file, so this fails on every OS. */
+        if (history_fails)
+            strcpy(app->history.path, "bm_test_message.json/history");
+        else
+            strcpy(app->store.path, "bm_test_message.json/config");
+        finish(app, true);
+        assert(!app->msg_in_progress && !app->msg_send_pending && !pending_job);
+        assert(app->history.count == 1 && app->history.items[0].target.uid == 1);
+        assert(app->store.guards.count == 2 && app->store.code_count == 2);
+        assert(app->toast_count > 0 && app->toasts[app->toast_count - 1].tone == CUI_TONE_DANGER);
+        destroy_app(app);
+    }
+}
+
+static void test_recall_expires_in_queue(void) {
+    int64_t now = 1700000000000LL;
+    bm_set_time_hooks(clock_now, clock_sleep, &now);
+    bm_app *app = new_app();
+    bm_sent_msg m = {.sender_uid = "42", .msg_key = "first", .timestamp_ms = now - 120000};
+    assert(bm_sent_history_append(&app->history, &m));
+    assert(bm_sent_history_save(&app->history) && bm_store_save(&app->store));
+    spawn_ok = false;
+    start_single_recall(app, 0);
+    assert(!pending_job && !app->msg_recall_pending && app->history.count == 1);
+    app->msg_in_progress = app->msg_is_recalling = true;
+    trigger_next_recall_step(app);
+    assert(!pending_job && !app->msg_is_recalling && !app->msg_in_progress);
+    spawn_ok = true;
+    start_single_recall(app, 0);
+    assert(pending_job && app->msg_recall_pending);
+    now++; /* Eligible when enqueued, but not when the worker actually runs. */
+    recall_step_job *job = pending_job;
+    pending_worker(job);
+    assert(job->skipped_timeout && pending_callback == on_recall_step_done);
+    pending_job = NULL;
+    pending_callback(job, app);
+    pending_callback = NULL;
+    assert(!app->msg_recall_pending && app->history.count == 1);
+    assert(app->toasts[app->toast_count - 1].tone == CUI_TONE_WARNING);
+    destroy_app(app);
+    bm_set_time_hooks(NULL, NULL, NULL);
 }
 
 static void test_long_toast_layout(void) {
@@ -636,6 +687,8 @@ int main(int argc, char **argv) {
     test_persistent_recall();
     test_recall_save_failure();
     test_independent_history_file();
+    test_write_failure_stops_chain();
+    test_recall_expires_in_queue();
     test_long_toast_layout();
     test_history_confirmations();
     test_pause_controls();
