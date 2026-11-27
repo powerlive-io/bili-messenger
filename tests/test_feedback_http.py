@@ -1,13 +1,17 @@
 """Loopback-only integration test; never contacts PowerLive or submits real feedback."""
 import email.parser
 import email.policy
+import faulthandler
 import http.server
+import socketserver
 import subprocess
 import sys
 import threading
 
 
-class Server(http.server.HTTPServer):
+# HTTPServer reverse-resolves even 127.0.0.1 in server_bind(). The handler
+# needs only a listening socket, not a hostname or a working DNS resolver.
+class Server(socketserver.TCPServer):
     failures = []
     requests = 0
 
@@ -57,12 +61,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
 
+faulthandler.dump_traceback_later(10)  # Capture a stall before CTest's 20s deadline.
 with Server(("127.0.0.1", 0), Handler) as server:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
         subprocess.run(
-            [sys.argv[1], "--http", f"http://127.0.0.1:{server.server_port}/feedback"],
+            [sys.argv[1], "--http", f"http://127.0.0.1:{server.server_address[1]}/feedback"],
             check=True,
             timeout=15,
         )
@@ -71,3 +76,4 @@ with Server(("127.0.0.1", 0), Handler) as server:
     finally:
         server.shutdown()
         thread.join()
+faulthandler.cancel_dump_traceback_later()
