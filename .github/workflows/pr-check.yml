@@ -44,3 +44,26 @@ jobs:
 
       - name: Run unit tests
         run: ctest --test-dir build -C Release --output-on-failure --no-tests=error -V
+
+  coverage:
+    name: Application line coverage
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install gcovr==8.6
+      - run: sh tests/coverage.sh
+        env:
+          GCOV: xcrun llvm-cov gcov
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: line-coverage
+          path: build/coverage.html
+          if-no-files-found: ignore

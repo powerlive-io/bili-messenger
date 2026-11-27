@@ -136,6 +136,7 @@ typedef struct bm_app {
 } bm_app;
 
 void bm_app_init(bm_app *app);
+void bm_app_frame(cui_ctx *ui, bm_app *app);
 void bm_app_shutdown(bm_app *app, cui_ctx *ui);
 
 void bm_toast_push(bm_app *app, const char *title, const char *desc, cui_tone tone);

@@ -430,6 +430,117 @@ static void test_guards_templates_and_store(void) {
     printf("PASS guard deduplication, TXT import/export, and template variable expansion\n");
 }
 
+/* Credentials can arrive across several QR redirects, not just in the poll URL. */
+static const char *qr_redirect(const recorded_req *r, int i, bm_http_resp *resp, void *ctx) {
+    (void)ctx;
+    if (i == 0) {
+        assert(strstr(r->url, "/qrcode/poll?qrcode_key=test"));
+        return "{\"data\":{\"code\":0,\"url\":\"https://fixture.invalid/first?DedeUserID=42\"}}";
+    }
+    if (i == 1) {
+        assert(!strcmp(r->url, "https://fixture.invalid/first?DedeUserID=42"));
+        assert(!strcmp(r->cookie, "DedeUserID=42"));
+        strcpy(resp->set_cookies[resp->set_cookie_count++], "SESSDATA=test%252Cvalue; Path=/");
+        strcpy(resp->location, "https://fixture.invalid/finish");
+    } else {
+        assert(i == 2 && !strcmp(r->url, "https://fixture.invalid/finish"));
+        assert(strstr(r->cookie, "SESSDATA=test%252Cvalue"));
+        strcpy(resp->set_cookies[resp->set_cookie_count++], "bili_jct=test-csrf; Path=/");
+    }
+    return "";
+}
+
+static void test_qr_login_states(void) {
+    bm_login_info login = {0};
+    bm_bili_err err = {0};
+    char msg[256];
+    int status;
+    reset_harness(qr_redirect, NULL);
+    assert(bm_bili_qr_poll("test", &status, msg, sizeof msg, &login, &err));
+    assert(status == 0 && g_h.req_count == 3 && login.has_login);
+    assert(!strcmp(login.SESSDATA, "test,value") && !strcmp(login.DedeUserID, "42"));
+    assert(!strcmp(login.bili_jct, "test-csrf"));
+
+    memset(&login, 0, sizeof login);
+    const struct { int code; const char *hint; } pending[] = {
+        {86101, "扫描"}, {86090, "确认登录"}, {86038, "已失效"}, {123, "unexpected"}
+    };
+    for (size_t i = 0; i < sizeof pending / sizeof pending[0]; i++) {
+        char body[128];
+        snprintf(body, sizeof body, "{\"data\":{\"code\":%d,\"message\":\"unexpected\"}}", pending[i].code);
+        reset_harness(reply_custom_str, body);
+        assert(bm_bili_qr_poll("test", &status, msg, sizeof msg, &login, &err));
+        assert(status == pending[i].code && strstr(msg, pending[i].hint));
+        assert(!login.has_login && g_h.req_count == 1);
+    }
+    reset_harness(reply_custom_str, "{\"data\":{\"code\":0,\"url\":\"http://fixture.invalid/\"}}");
+    assert(!bm_bili_qr_poll("test", &status, msg, sizeof msg, &login, &err));
+    assert(!login.has_login && g_h.req_count == 1 && strstr(err.message, "不安全"));
+
+    const char *bad[] = {"__NETERR__", "not json", "{\"data\":{}}"};
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        char url[64] = "old-url", key[32] = "old-key";
+        reset_harness(reply_custom_str, (void *)bad[i]);
+        assert(!bm_bili_qr_generate(url, sizeof url, key, sizeof key, &err));
+        assert(!key[0] && !url[0]);
+        assert(!bm_bili_qr_poll("test", &status, msg, sizeof msg, &login, &err));
+        assert(status == -1 && !login.has_login);
+    }
+}
+
+static void test_account_and_search(void) {
+    bm_login_info login = make_test_login();
+    bm_user_profile profile;
+    bm_bili_err err = {0};
+    bool active = true;
+    reset_harness(reply_custom_str, "{\"code\":0,\"data\":{\"isLogin\":false}}");
+    assert(bm_bili_check_cookies(&login, &active, &err) && !active);
+    assert(strstr(g_h.reqs[0].cookie, "SESSDATA=test-session"));
+    reset_harness(reply_custom_str, "{\"code\":-101,\"message\":\"expired\"}");
+    assert(!bm_bili_get_user_info(&login, 42, &profile, &err));
+    assert(err.code == -101 && !strcmp(err.message, "expired"));
+
+    /* Never add a similarly named account, even when the API ranks it first. */
+    reset_harness(reply_custom_str, "{\"code\":0,\"data\":{\"result\":["
+                  "{\"mid\":42,\"uname\":\"A B\",\"upic\":\"//fixture.invalid/a.png\"}]}}");
+    assert(bm_bili_search_user(&login, "A B", &profile, &err));
+    assert(strstr(g_h.reqs[0].url, "keyword=A%20B&"));
+    assert(profile.mid == 42 && !strcmp(profile.uname, "A B"));
+    assert(!strcmp(profile.face, "https://fixture.invalid/a.png"));
+    assert(!bm_bili_search_user(&login, "A", &profile, &err));
+    assert(!profile.mid && !profile.uname[0]);
+    const char *bad[] = {"__NETERR__", "not json", "{\"data\":{}}"};
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        reset_harness(reply_custom_str, (void *)bad[i]);
+        assert(!bm_bili_search_user(&login, "A", &profile, &err));
+        assert(!bm_bili_get_user_info(&login, 42, &profile, &err));
+        assert(!bm_bili_check_cookies(&login, &active, &err) && !active);
+    }
+}
+
+static void test_snapshot_and_history_failures(void) {
+    bm_guard_list guards = {0};
+    bm_chart_history history = {0};
+    bm_bili_err err = {0};
+    reset_harness(reply_custom_str, "{\"Code\":0,\"Data\":[{\"Uid\":17,\"Guard_level\":1},"
+                  "{\"Uid\":\"7654321000\",\"Guard_level\":\"2\"},{\"Username\":\"missing UID\"}]}");
+    assert(bm_bili_get_guard_snapshot("123", "2020-01-02", &guards, &err));
+    assert(guards.count == 2 && guards.items[0].uid == 17 && guards.items[0].guard_level == 1);
+    assert(guards.items[1].uid == 7654321000ULL && guards.items[1].guard_level == 2);
+    const char *bad[] = {"__NETERR__", "not json", "{\"Code\":404}"};
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        bm_room_info room;
+        reset_harness(reply_custom_str, (void *)bad[i]);
+        assert(!bm_bili_get_guard_snapshot("123", "2020-01-02", &guards, &err) && !guards.count);
+        assert(!bm_bili_get_guard_list(42, &guards, &err));
+        assert(!bm_bili_get_room_info("123", &room, &err));
+        assert(!bm_bili_get_vtbs_history(42, true, &history, &err) && !history.count);
+    }
+    reset_harness(reply_custom_str, "[]");
+    assert(bm_bili_get_vtbs_history(42, true, &history, &err) && !history.count);
+    bm_guard_list_free(&guards);
+}
+
 static void test_electron_store_config_compat(void) {
     /* CTest runs in the build directory, keeping fixtures local and allowing
        Debug and Release tests to run independently. */
@@ -671,6 +782,9 @@ int main(void) {
     test_gift_stream_validation();
     test_gift_stream_errors();
     test_wbi_and_send_message();
+    test_qr_login_states();
+    test_account_and_search();
+    test_snapshot_and_history_failures();
     test_guards_templates_and_store();
     test_send_queue_keeps_unsent_roster_members();
     test_electron_store_config_compat();
