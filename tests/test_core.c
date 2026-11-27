@@ -383,6 +383,52 @@ static void test_wbi_and_send_message(void) {
     printf("PASS WBI signing, bili_ticket capture, and 64-bit msg_key preservation\n");
 }
 
+static const char *reply_quoted_key(const recorded_req *r, int index, bm_http_resp *resp, void *ctx) {
+    if (strstr(r->url, "/nav")) return reply_send_msg_flow(r, index, resp, ctx);
+    return "{\"code\":0,\"data\":{\"msg_key\":\"99999999999999999999\"}}";
+}
+
+static void test_message_key_cache(void) {
+    bm_login_info login = make_test_login();
+    login.dev_id[0] = '\0'; /* Generate one device ID per sender. */
+    reset_harness(reply_quoted_key, NULL);
+    char key[64];
+    bm_bili_err err = {0};
+    assert(bm_bili_send_message(&login, 42, "one", key, sizeof key, &err));
+    assert(!strcmp(key, "99999999999999999999"));
+    assert(bm_bili_send_message(&login, 42, "two", key, sizeof key, &err));
+    assert(g_h.req_count == 3 && !strcmp(g_h.reqs[1].url, g_h.reqs[2].url));
+    g_h.now_ms += 300000;
+    assert(bm_bili_send_message(&login, 42, "three", key, sizeof key, &err));
+    assert(g_h.req_count == 5 && strstr(g_h.reqs[3].url, "/nav"));
+
+    const char *bad_nav[] = {"__NETERR__", "not json", "{\"code\":-101,\"message\":\"expired\"}"};
+    for (size_t i = 0; i < sizeof bad_nav / sizeof bad_nav[0]; i++) {
+        reset_harness(reply_custom_str, (void *)bad_nav[i]);
+        assert(!bm_bili_send_message(&login, 42, "not sent", key, sizeof key, &err));
+        assert(g_h.req_count == 1 && strstr(g_h.reqs[0].url, "/nav"));
+        assert(err.message[0] && err.code == (i == 2 ? -101 : -1));
+    }
+}
+
+static void test_encoding_and_digest(void) {
+    char buf[128];
+    /* WBI signing strips these five punctuation marks, but a regular form
+       must keep them as escaped bytes. Never truncate halfway through %XX. */
+    bm_url_encode("a !'()*~", buf, sizeof buf);
+    assert(!strcmp(buf, "a%20%21%27%28%29%2A~"));
+    bm_url_encode_wbi("a !'()*~", buf, sizeof buf);
+    assert(!strcmp(buf, "a%20~"));
+    bm_url_encode_wbi("a b", buf, 4);
+    assert(!strcmp(buf, "a"));
+    bm_url_decode("%4a%4B%X0%0Z%", buf, sizeof buf);
+    assert(!strcmp(buf, "JK%X0%0Z%"));
+    /* RFC 1321's 62-byte vector requires a second padding block. */
+    const char vector[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    bm_md5_hex(vector, sizeof vector - 1, buf);
+    assert(!strcmp(buf, "d174ab98d277d9f5a5611c2c9f419d9f"));
+}
+
 static void test_guards_templates_and_store(void) {
     bm_guard_list list;
     bm_guard_list_init(&list);
@@ -428,6 +474,117 @@ static void test_guards_templates_and_store(void) {
     bm_guard_list_free(&list);
     bm_guard_list_free(&imported);
     printf("PASS guard deduplication, TXT import/export, and template variable expansion\n");
+}
+
+/* Credentials can arrive across several QR redirects, not just in the poll URL. */
+static const char *qr_redirect(const recorded_req *r, int i, bm_http_resp *resp, void *ctx) {
+    (void)ctx;
+    if (i == 0) {
+        assert(strstr(r->url, "/qrcode/poll?qrcode_key=test"));
+        return "{\"data\":{\"code\":0,\"url\":\"https://fixture.invalid/first?DedeUserID=42\"}}";
+    }
+    if (i == 1) {
+        assert(!strcmp(r->url, "https://fixture.invalid/first?DedeUserID=42"));
+        assert(!strcmp(r->cookie, "DedeUserID=42"));
+        strcpy(resp->set_cookies[resp->set_cookie_count++], "SESSDATA=test%252Cvalue; Path=/");
+        strcpy(resp->location, "https://fixture.invalid/finish");
+    } else {
+        assert(i == 2 && !strcmp(r->url, "https://fixture.invalid/finish"));
+        assert(strstr(r->cookie, "SESSDATA=test%252Cvalue"));
+        strcpy(resp->set_cookies[resp->set_cookie_count++], "bili_jct=test-csrf; Path=/");
+    }
+    return "";
+}
+
+static void test_qr_login_states(void) {
+    bm_login_info login = {0};
+    bm_bili_err err = {0};
+    char msg[256];
+    int status;
+    reset_harness(qr_redirect, NULL);
+    assert(bm_bili_qr_poll("test", &status, msg, sizeof msg, &login, &err));
+    assert(status == 0 && g_h.req_count == 3 && login.has_login);
+    assert(!strcmp(login.SESSDATA, "test,value") && !strcmp(login.DedeUserID, "42"));
+    assert(!strcmp(login.bili_jct, "test-csrf"));
+
+    memset(&login, 0, sizeof login);
+    const struct { int code; const char *hint; } pending[] = {
+        {86101, "扫描"}, {86090, "确认登录"}, {86038, "已失效"}, {123, "unexpected"}
+    };
+    for (size_t i = 0; i < sizeof pending / sizeof pending[0]; i++) {
+        char body[128];
+        snprintf(body, sizeof body, "{\"data\":{\"code\":%d,\"message\":\"unexpected\"}}", pending[i].code);
+        reset_harness(reply_custom_str, body);
+        assert(bm_bili_qr_poll("test", &status, msg, sizeof msg, &login, &err));
+        assert(status == pending[i].code && strstr(msg, pending[i].hint));
+        assert(!login.has_login && g_h.req_count == 1);
+    }
+    reset_harness(reply_custom_str, "{\"data\":{\"code\":0,\"url\":\"http://fixture.invalid/\"}}");
+    assert(!bm_bili_qr_poll("test", &status, msg, sizeof msg, &login, &err));
+    assert(!login.has_login && g_h.req_count == 1 && strstr(err.message, "不安全"));
+
+    const char *bad[] = {"__NETERR__", "not json", "{\"data\":{}}"};
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        char url[64] = "old-url", key[32] = "old-key";
+        reset_harness(reply_custom_str, (void *)bad[i]);
+        assert(!bm_bili_qr_generate(url, sizeof url, key, sizeof key, &err));
+        assert(!key[0] && !url[0]);
+        assert(!bm_bili_qr_poll("test", &status, msg, sizeof msg, &login, &err));
+        assert(status == -1 && !login.has_login);
+    }
+}
+
+static void test_account_and_search(void) {
+    bm_login_info login = make_test_login();
+    bm_user_profile profile;
+    bm_bili_err err = {0};
+    bool active = true;
+    reset_harness(reply_custom_str, "{\"code\":0,\"data\":{\"isLogin\":false}}");
+    assert(bm_bili_check_cookies(&login, &active, &err) && !active);
+    assert(strstr(g_h.reqs[0].cookie, "SESSDATA=test-session"));
+    reset_harness(reply_custom_str, "{\"code\":-101,\"message\":\"expired\"}");
+    assert(!bm_bili_get_user_info(&login, 42, &profile, &err));
+    assert(err.code == -101 && !strcmp(err.message, "expired"));
+
+    /* Never add a similarly named account, even when the API ranks it first. */
+    reset_harness(reply_custom_str, "{\"code\":0,\"data\":{\"result\":["
+                  "{\"mid\":42,\"uname\":\"A B\",\"upic\":\"//fixture.invalid/a.png\"}]}}");
+    assert(bm_bili_search_user(&login, "A B", &profile, &err));
+    assert(strstr(g_h.reqs[0].url, "keyword=A%20B&"));
+    assert(profile.mid == 42 && !strcmp(profile.uname, "A B"));
+    assert(!strcmp(profile.face, "https://fixture.invalid/a.png"));
+    assert(!bm_bili_search_user(&login, "A", &profile, &err));
+    assert(!profile.mid && !profile.uname[0]);
+    const char *bad[] = {"__NETERR__", "not json", "{\"data\":{}}"};
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        reset_harness(reply_custom_str, (void *)bad[i]);
+        assert(!bm_bili_search_user(&login, "A", &profile, &err));
+        assert(!bm_bili_get_user_info(&login, 42, &profile, &err));
+        assert(!bm_bili_check_cookies(&login, &active, &err) && !active);
+    }
+}
+
+static void test_snapshot_and_history_failures(void) {
+    bm_guard_list guards = {0};
+    bm_chart_history history = {0};
+    bm_bili_err err = {0};
+    reset_harness(reply_custom_str, "{\"Code\":0,\"Data\":[{\"Uid\":17,\"Guard_level\":1},"
+                  "{\"Uid\":\"7654321000\",\"Guard_level\":\"2\"},{\"Username\":\"missing UID\"}]}");
+    assert(bm_bili_get_guard_snapshot("123", "2020-01-02", &guards, &err));
+    assert(guards.count == 2 && guards.items[0].uid == 17 && guards.items[0].guard_level == 1);
+    assert(guards.items[1].uid == 7654321000ULL && guards.items[1].guard_level == 2);
+    const char *bad[] = {"__NETERR__", "not json", "{\"Code\":404}"};
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        bm_room_info room;
+        reset_harness(reply_custom_str, (void *)bad[i]);
+        assert(!bm_bili_get_guard_snapshot("123", "2020-01-02", &guards, &err) && !guards.count);
+        assert(!bm_bili_get_guard_list(42, &guards, &err));
+        assert(!bm_bili_get_room_info("123", &room, &err));
+        assert(!bm_bili_get_vtbs_history(42, true, &history, &err) && !history.count);
+    }
+    reset_harness(reply_custom_str, "[]");
+    assert(bm_bili_get_vtbs_history(42, true, &history, &err) && !history.count);
+    bm_guard_list_free(&guards);
 }
 
 static void test_electron_store_config_compat(void) {
@@ -515,6 +672,86 @@ static void test_electron_store_config_compat(void) {
     printf("PASS electron-store config.json load/save compatibility\n");
 }
 
+/* Older profiles sometimes have a queue but no originalGuards. Keep titles,
+   timestamps and the remaining inventory when migrating and saving edits. */
+static void test_queue_only_profile(void) {
+    const char *path = "bm_test_queue_only.json";
+    const char json[] = "{\"roomID\":123,\"setting\":{\"sendInterval\":\"2100\"},"
+        "\"guards\":[{\"uid\":\"42\",\"username\":\"A\",\"guard_level\":4,"
+        "\"time\":\"2024-02-29 11:00:00\"},{\"uid\":99,\"username\":\"B\"}],"
+        "\"templateList\":[\"one\",\"two\"],\"template:one\":\"first\",\"template:two\":\"second\","
+        "\"codes\":[\"used\",\"next\"]}";
+    bm_store s;
+    bm_store_init(&s);
+    assert(bm_write_file(path, json, sizeof json - 1) && bm_store_load(&s, path));
+    assert(!strcmp(s.room_id, "123") && s.send_interval == 2100 && s.original_guards.count == 2);
+    const bm_guard *first = &s.original_guards.items[0];
+    assert(first->uid == 42 && !strcmp(first->custom_title, "自定义"));
+    assert(s.original_guards.items[1].guard_level == 3);
+    assert(bm_store_delete_template(&s, "one") && !bm_store_delete_template(&s, "absent"));
+    bm_store_set_template(&s, "two", "edited");
+    assert(bm_store_pop_first_code(&s) && bm_store_save(&s));
+    bm_store_free(&s);
+    bm_store_init(&s);
+    assert(bm_store_load(&s, path));
+    assert(s.original_guards.count == 2 && s.original_guards.items[0].uid == 42);
+    assert(!strcmp(s.original_guards.items[0].time, "2024-02-29 11:00:00"));
+    assert(!strcmp(s.original_guards.items[0].custom_title, "自定义"));
+    assert(s.template_count == 1 && !strcmp(bm_store_get_template(&s, "two"), "edited"));
+    assert(s.code_count == 1 && !strcmp(s.codes[0].code, "next"));
+    assert(bm_write_file(path, "[]", 2) && !bm_store_load(&s, path));
+    assert(s.original_guards.count == 2 && !strcmp(s.room_id, "123"));
+    bm_store_free(&s);
+    assert(remove(path) == 0);
+}
+
+static void test_timestamped_roster_formats(void) {
+    const char *csv = "\xEF\xBB\xBF,42,Alice,2024-02-29T12:34:56\r\n"
+                      "提督,42,Alice,2024-03-01T00:00:00\r\n";
+    bm_guard_list list = {0};
+    assert(bm_guard_import_text(&list, csv, false) && list.count == 2);
+    assert(!strcmp(list.items[0].custom_title, "自定义"));
+    assert(bm_guard_deduplicate(&list) == 1 && list.items[0].guard_level == 2);
+    for (int txt = 0; txt <= 1; txt++) {
+        size_t len;
+        char *wire = txt ? bm_guard_format_txt(&list, &len) : bm_guard_format_csv(&list, &len);
+        assert(wire && strlen(wire) == len && strstr(wire, "2024-03-01T00:00:00"));
+        assert(bm_guard_import_text(&list, wire, txt != 0));
+        assert(list.count == 1 && list.items[0].uid == 42 && list.items[0].guard_level == 2);
+        assert(!strcmp(list.items[0].time, "2024-03-01 00:00:00"));
+        free(wire);
+    }
+    bm_guard_list_free(&list);
+}
+
+static void test_message_failures_and_recall(void) {
+    char key[64];
+    bm_bili_err err = {0};
+    bm_login_info login = make_test_login();
+    reset_harness(NULL, NULL);
+    assert(!bm_bili_send_message(NULL, 42, "hello", key, sizeof key, &err));
+    assert(!bm_bili_send_message(&login, 0, "hello", key, sizeof key, &err));
+    assert(!bm_bili_recall_message(NULL, 42, "123", &err) && !g_h.req_count);
+    const struct { const char *body; int code; const char *detail; } failures[] = {
+        {"__NETERR__", -1, "network failure"}, {" <html>", -1, "HTML"},
+        {"bad json", -1, "解析"}, {"{\"code\":403,\"message\":\"denied\"}", 403, "denied"},
+        {"{\"code\":400}", 400, "400"}
+    };
+    for (size_t i = 0; i < sizeof failures / sizeof failures[0]; i++) {
+        reset_harness(reply_custom_str, (void *)failures[i].body);
+        assert(!bm_bili_recall_message(&login, 42, "7290000000000000001", &err));
+        assert(err.code == failures[i].code && strstr(err.message, failures[i].detail));
+    }
+    reset_harness(reply_custom_str, "{\"code\":0}");
+    g_h.now_ms = 1700000000999LL;
+    assert(bm_bili_recall_message(&login, 42, "7290000000000000001", &err));
+    assert(g_h.req_count == 1 && !strcmp(g_h.reqs[0].method, "POST"));
+    assert(strstr(g_h.reqs[0].body, "msg%5Bmsg_type%5D=5&"));
+    assert(strstr(g_h.reqs[0].body, "msg%5Bcontent%5D=7290000000000000001&"));
+    assert(strstr(g_h.reqs[0].body, "msg%5Breceiver_id%5D=42&"));
+    assert(strstr(g_h.reqs[0].body, "msg%5Btimestamp%5D=1700000000000&"));
+}
+
 static const char *reply_github_release(const recorded_req *r, int index, bm_http_resp *resp, void *ctx) {
     (void)r; (void)index; (void)resp; (void)ctx;
     return "{\"tag_name\":\"v9999.0.0\",\"body\":\"Release notes\","
@@ -532,6 +769,12 @@ static void test_github_update(void) {
     assert(strcmp(tag, "v9999.0.0") == 0);
     assert(strcmp(body, "Release notes") == 0);
     assert(strcmp(url, "https://github.com/powerlive-io/bili-messenger/releases/tag/v9999.0.0") == 0);
+    const char *bad[] = {"__NETERR__", "not json", "{\"body\":\"no tag\"}"};
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        reset_harness(reply_custom_str, (void *)bad[i]);
+        assert(!bm_bili_check_github_update(tag, sizeof tag, body, sizeof body, url, sizeof url, &err));
+        assert(!tag[0] && !url[0] && !body[0] && err.message[0]);
+    }
     printf("PASS GitHub update endpoint and release response\n");
 }
 
@@ -671,9 +914,17 @@ int main(void) {
     test_gift_stream_validation();
     test_gift_stream_errors();
     test_wbi_and_send_message();
+    test_message_key_cache();
+    test_encoding_and_digest();
+    test_qr_login_states();
+    test_account_and_search();
+    test_snapshot_and_history_failures();
     test_guards_templates_and_store();
+    test_timestamped_roster_formats();
+    test_message_failures_and_recall();
     test_send_queue_keeps_unsent_roster_members();
     test_electron_store_config_compat();
+    test_queue_only_profile();
     printf("All test suites passed!\n");
     return 0;
 }

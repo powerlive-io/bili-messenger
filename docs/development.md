@@ -82,6 +82,25 @@ python3 assets/icons/generate.py
 
 测试默认开启，可通过 `-DBM_BUILD_TESTS=OFF` 关闭。测试覆盖核心逻辑、反馈持久化、反馈界面及 HTTP 提交等行为，具体目标见 [CMakeLists.txt](../CMakeLists.txt)。
 
+### 复现行覆盖率检查
+
+[PR 检查](../.github/workflows/pr-check.yml)在 macOS 上要求 `src/` 中本次构建的应用代码**总行覆盖率不低于 93%**。核心库、页面、入口和平台窗口代码即使未被执行也计入分母；测试和第三方依赖不计入。门槛适用于总体可执行行，不是单文件或分支覆盖率。
+
+在仓库根目录执行（需要 Python 3 和前述构建依赖）：
+
+```bash
+python3 -m venv build/coverage-tools
+. build/coverage-tools/bin/activate
+python -m pip install gcovr==8.6
+GCOV="xcrun llvm-cov gcov" sh tests/coverage.sh   # macOS / AppleClang
+```
+
+Linux 使用 GCC 时可直接执行 `sh tests/coverage.sh`；Clang 需将 `GCOV` 设为匹配版本的 `llvm-cov gcov`。脚本每次新建 Debug 构建目录、编译完整应用并运行 CTest，不累加旧计数。测试失败或覆盖率未达标都会返回非零。打开 `build/coverage.html` 可按文件查看未覆盖行；在 CI 中可下载 `line-coverage` artifact。
+
+`bm_app_workflow` 使用临时用户目录、模拟 HTTP 响应和软件渲染器，验证从扫码、绑定直播间到整理名单、保存模板及重启恢复的流程，不需要真实账号或桌面窗口。
+
+### 发布构建
+
 仓库的 [Release 工作流](../.github/workflows/release.yml) 构建并测试 macOS 和 Windows 版本：
 
 | 平台 | 发布文件 | 说明 |
